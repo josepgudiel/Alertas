@@ -1,0 +1,38 @@
+name: SAAI Alert System
+
+on:
+  schedule:
+    - cron: '30,45 13 * * 1-5'
+    - cron: '0,15,30,45 14 * * 1-5'
+    - cron: '0,15,30,45 15 * * 1-5'
+    - cron: '0,15,30,45 16 * * 1-5'
+    - cron: '0,15,30,45 17 * * 1-5'
+    - cron: '0,15,30,45 18 * * 1-5'
+    - cron: '0,15,30,45 19 * * 1-5'
+    - cron: '0 20 * * 1-5'
+  workflow_dispatch:
+
+env:
+  SAAI_TICKERS: "SPY,QQQ,DIA"
+  TWILIO_SID: ${{ secrets.TWILIO_SID }}
+  TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
+  TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+  TWILIO_TO: ${{ secrets.TWILIO_TO }}
+  GMAIL_USER: ${{ secrets.GMAIL_USER }}
+  GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+  EMAIL_TO: ${{ secrets.EMAIL_TO }}
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run SAAI Analysis
+        run: python main.py
