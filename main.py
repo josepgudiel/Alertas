@@ -15,8 +15,7 @@ from pathlib import Path
 import pytz
 
 from analysis_engine import run_analysis, SignalStrength
-from notifications import send_alert, format_sms
-
+from notifications import send_alert
 
 # Archivo para rastrear alertas enviadas y evitar duplicados
 ALERT_LOG = Path("alert_history.json")
