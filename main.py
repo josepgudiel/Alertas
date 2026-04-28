@@ -1,6 +1,5 @@
-"""
-SAAI v4 — Main Entry Point
-"""
+# SAAI v4 - Main Entry Point
+# Basado en Un Millon al Anno No Hace Danno - Yoel Sardinas
 
 import json
 import os
@@ -59,14 +58,14 @@ def is_market_hours() -> bool:
 
 def main():
     print("\n" + "=" * 60)
-    print("  🚀 SAAI v4 — Smart Alert AI System")
-    print("  📖 Metodología: Un Millón al Año No Hace Daño")
-    print("  👤 Yoel Sardiñas")
+    print("  SAAI v4 — Smart Alert AI System")
+    print("  Metodologia: Un Millon al Anno No Hace Danno")
+    print("  Yoel Sardinas")
     print("=" * 60)
 
     if not is_market_hours():
         if os.environ.get("SAAI_TEST_MODE") == "true":
-            print("[SAAI] ⚠️ Modo de prueba — ejecutando fuera de horario")
+            print("[SAAI] Modo de prueba — ejecutando fuera de horario")
         else:
             print("[SAAI] Terminando — fuera de horario de mercado")
             return
@@ -75,8 +74,7 @@ def main():
     alerts = run_analysis(tickers)
 
     if not alerts:
-        print("\n[SAAI] 📊 Sin señales — todas las condiciones están por debajo del umbral")
-        print("[SAAI] 💡 Recuerda: 'Si algún elemento no se presenta, se convierte en una apuesta.'")
+        print("\n[SAAI] Sin senales — todas las condiciones estan por debajo del umbral")
         return
 
     history = load_alert_history()
@@ -86,12 +84,12 @@ def main():
         if alert.strength == SignalStrength.DEBIL:
             continue
         if is_duplicate(alert, history):
-            print(f"[{alert.ticker}] ⏭️ Alerta duplicada — ya enviada recientemente")
+            print(f"[{alert.ticker}] Alerta duplicada — ya enviada recientemente")
             continue
 
-        print(f"\n[{alert.ticker}] 📤 Enviando alerta...")
-        print(f"  📖 {alert.strategy.value}")
-        print(f"  🎯 {alert.direction.value} {alert.strength.value}")
+        print(f"\n[{alert.ticker}] Enviando alerta...")
+        print(f"  {alert.strategy.value}")
+        print(f"  {alert.direction.value} {alert.strength.value}")
 
         results = send_alert(alert)
 
@@ -110,8 +108,7 @@ def main():
     save_alert_history(history)
 
     print(f"\n{'=' * 60}")
-    print(f"  📊 Resumen: {len(alerts)} señales detectadas, {sent_count} alertas enviadas")
-    print(f"  📖 'Las inversiones son 80% emociones y 20% conocimiento.'")
+    print(f"  Resumen: {len(alerts)} senales detectadas, {sent_count} alertas enviadas")
     print(f"{'=' * 60}\n")
 
 
