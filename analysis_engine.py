@@ -1,34 +1,8 @@
-"""
-SAAI v4 — Smart Alert AI System
-Motor de Análisis — LÓGICA CORRECTA
-Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
-
-LÓGICA CORREGIDA:
-
-MEDIAS MÓVILES:
-  → Toma de decisión en 1 HORA
-  → Diario = puntos ciegos (techos/pisos que no se ven en 1H)
-  → No dicta la dirección, da contexto
-
-BOLLINGER BANDS:
-  → Toma de decisión en 15 MINUTOS
-  → La puerta de entrada
-  → 1H y Diario dan contexto adicional pero BB 15min manda
-
-PANORAMA COMPLETO:
-  → 1H + 15min alineados = señal válida
-  → Diario confirma = señal más fuerte
-  → Diario contradice = advertencia de punto ciego
-
-UMBRALES DE SCORE:
-  < 50  = DÉBIL — NO se envía alerta
-  50-60 = MODERADO — se envía
-  > 60  = FUERTE — se envía
-
-"Si algún elemento de la estrategia no se está presentando,
-ya no es una estrategia, se convierte en una apuesta."
-— Yoel Sardiñas
-"""
+# SAAI v4 - Smart Alert AI System
+# Motor de Analisis - LOGICA CORRECTA
+# Basado en Un Millon al Anno No Hace Danno - Yoel Sardinas
+# UMBRALES: score < 50 = no alerta | 50-60 = MODERADO | > 60 = FUERTE
+# MAs decision en 1H | BB decision en 15min | Diario = puntos ciegos
 
 import yfinance as yf
 import pandas as pd
@@ -423,16 +397,8 @@ def analyze_gaps(df_daily: pd.DataFrame, ma: MADecision) -> dict:
 # ============================================================
 
 def calc_score(ma: MADecision, bb: BBDecision, gap: dict, chop: float) -> tuple:
-    """
-    BB 15min  = hasta 50 pts (puerta principal)
-    MAs 1H    = hasta 40 pts (dirección)
-    Diario    = hasta 10 pts (contexto)
-
-    UMBRALES:
-    < 50  = DÉBIL — no se envía
-    50-60 = MODERADO
-    > 60  = FUERTE
-    """
+    # BB 15min = hasta 50 pts | MAs 1H = hasta 40 pts | Diario = hasta 10 pts
+    # UMBRALES: < 50 = DEBIL | 50-60 = MODERADO | > 60 = FUERTE
     score = 0.0
     bullish = 0
     bearish = 0
@@ -489,12 +455,7 @@ def calc_score(ma: MADecision, bb: BBDecision, gap: dict, chop: float) -> tuple:
 
 
 def score_to_strength(score: float) -> SignalStrength:
-    """
-    Convierte score a nivel de fuerza.
-    < 50  = DÉBIL (no se envía)
-    50-60 = MODERADO
-    > 60  = FUERTE
-    """
+    # Convierte score: < 50 = DEBIL | 50-60 = MODERADO | > 60 = FUERTE
     if score > 60:
         return SignalStrength.FUERTE
     elif score >= 50:
