@@ -58,7 +58,7 @@ def is_market_hours():
 
 def main():
     print("\n" + "=" * 60)
-    print("  SAAI v4 -- Smart Alert AI System")
+    print(" SAAI v4.2 -- Smart Alert AI System")
     print("  Un Millon al Anno No Hace Danno -- Yoel Sardinas")
     print("=" * 60)
 
