@@ -135,7 +135,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()    print("  Un Millon al Anno No Hace Danno -- Yoel Sardinas")
+    main()    
+    print("  Un Millon al Anno No Hace Danno -- Yoel Sardinas")
     print("=" * 60)
 
     if not is_market_hours():
