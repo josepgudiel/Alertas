@@ -1,16 +1,38 @@
-# SAAI v4.2 - Smart Alert AI System
-# Motor de Analisis - LOGICA CORRECTA
-# Basado en Un Millon al Anno No Hace Danno - Yoel Sardinas
-#
-# FIXES v4.2:
-# FIX 1: Score < 50 = NO se envia SIN EXCEPCIONES
-# FIX 2: Saltos SOLO en apertura (9:30-10:00am ET) - no durante el dia
-# FIX 3: Gap bajista solo PUT si MAs 1H bajistas (y viceversa)
-# FIX 4: Mercado choppy = no alerta
-# FIX 5: Volatilidad real requerida para BB (percentil > 60)
-#
-# UMBRALES: score < 50 = no alerta | 50-60 = MODERADO | > 60 = FUERTE
-# MAs decision en 1H | BB decision en 15min | Diario = puntos ciegos
+"""
+SAAI v5.1 - Smart Alert AI System
+Motor de Análisis — FIEL AL LIBRO
+
+Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
+
+FILOSOFÍA:
+  - MAs en 1H  → DECISIÓN (tendencia, canal lateral)
+  - BB en 15min → ENTRADA (volatilidad real, confirmación)
+  - Diario      → CONTEXTO (puntos ciegos institucionales)
+
+ESTRATEGIAS (solo las del libro):
+  E1 — Canal Lateral al Alza  (ruptura + volatilidad real)
+  E2 — Canal Lateral a la Baja (ruptura + volatilidad real)
+  E3 — Saltos en Apertura     (solo 9:30-10:00am ET)
+
+ADVERTENCIAS (no bloquean, informan):
+  - Agotamiento de tendencia  → BB contrayéndose en tendencia extendida
+  - Earnings próximos         → alerta automática si earnings en <= 3 días
+  - Eventos macro             → FOMC, CPI, NFP, OpEx
+
+REGLAS DE VOLATILIDAD (obligatorias):
+  - BB 15min percentil > 75  → ALTA   → E1/E2/E3 pueden alertar
+  - BB 15min percentil 60-75 → MEDIA  → solo E3 puede alertar
+  - BB 15min percentil < 60  → BAJA   → NO ALERTAR (sin excepciones)
+  - BB debe estar EXPANDIENDO
+  - Vela de confirmación con cuerpo > 70% del rango
+
+REGLAS ADICIONALES:
+  - Score < 55 = no se envía, sin excepciones
+  - Mercado choppy (chop > 61.8) = no alerta
+  - Saltos SOLO 9:30-10:00am ET
+  - Gap bajista solo PUT si MAs 1H bajistas (y viceversa)
+  - Canal mínimo 10 días en 1H
+"""
 
 import yfinance as yf
 import pandas as pd
@@ -23,789 +45,1073 @@ from typing import Optional
 import pytz
 
 
+# ============================================================
+# TICKERS POR CATEGORÍA — LISTADO SAAI
+# ============================================================
+
+TICKERS_SAAI = {
+    "TECHNOLOGY":    ["AMZN", "AAPL", "GOOG", "META", "MSFT", "NFLX", "PLTR", "ORCL"],
+    "SEMICONDUCTORS":["AMD", "MU", "NVDA", "QCOM", "AVGO", "SOXL"],
+    "SOFTWARE_APP":  ["DASH", "LYFT", "UBER"],
+    "CONSUMER":      ["HD", "LOW", "WMT"],
+    "INDEX_USA":     ["DIA", "QQQ", "SPY", "SPX", "IWM", "TNA"],
+    "CARDS":         ["AXP", "C", "MA", "PYPL", "V"],
+    "CHINA":         ["BABA", "LI", "NIO", "XPEV"],
+    "COMMODITY":     ["GLD", "SLV", "USO"],
+    "FINANCIAL_DATA":["COIN", "HOOD"],
+    "HEALTHCARE":    ["CVS", "MRNA", "PFE"],
+    "INDUSTRIALS":   ["BA"],
+    "NUCLEAR_ENERGY":["URA"],
+    "TSLA":          ["TSLA"],
+}
+
+# Lista plana para el análisis
+DEFAULT_TICKERS = [t for group in TICKERS_SAAI.values() for t in group]
+
+
+# ============================================================
+# ENUMS
+# ============================================================
+
 class SignalDirection(Enum):
-    CALL = "CALL"
-    PUT = "PUT"
+    CALL    = "CALL"
+    PUT     = "PUT"
     NEUTRAL = "NEUTRAL"
 
 class SignalStrength(Enum):
-    FUERTE = "FUERTE"
+    FUERTE   = "FUERTE"
     MODERADO = "MODERADO"
-    DEBIL = "DEBIL"
+    DEBIL    = "DEBIL"
 
 class StrategyType(Enum):
-    CANAL_LATERAL_ALZA     = "Estrategia 1 - Canal Lateral al Alza"
-    CANAL_LATERAL_BAJA     = "Estrategia 2 - Canal Lateral a la Baja"
-    SALTO_ALCISTA          = "Estrategia 3 - Salto Alcista"
-    SALTO_BAJISTA          = "Estrategia 3 - Salto Bajista"
-    SALTO_CAMBIO_TENDENCIA = "Estrategia 3 - Salto Cambio de Tendencia"
-    BB_SALIDA_CALL         = "BB Salida de Banda - CALL"
-    BB_SALIDA_PUT          = "BB Salida de Banda - PUT"
-    BB_ACERCAMIENTO_CALL   = "BB Acercamiento con Volatilidad - CALL"
-    BB_ACERCAMIENTO_PUT    = "BB Acercamiento con Volatilidad - PUT"
-    REBOTE_MA_CALL         = "Rebote en MA como Piso - CALL"
-    REBOTE_MA_PUT          = "Rebote en MA como Techo - PUT"
-    SQUEEZE                = "Squeeze - Explosion Inminente"
-    AGOTAMIENTO            = "Agotamiento de Estrategia"
-    NONE                   = "Sin estrategia"
+    # Las 3 estrategias del libro
+    E1_CANAL_ALZA      = "E1 — Canal Lateral al Alza (CALL)"
+    E2_CANAL_BAJA      = "E2 — Canal Lateral a la Baja (PUT)"
+    E3_SALTO_ALCISTA   = "E3 — Salto Alcista en Apertura (CALL)"
+    E3_SALTO_BAJISTA   = "E3 — Salto Bajista en Apertura (PUT)"
+    E3_CAMBIO_TENDENCIA= "E3 — Salto Cambio de Tendencia"
+    # Monitoreo (no acción inmediata)
+    SQUEEZE_CANAL      = "Squeeze en Canal — Esperar Ruptura"
+    NONE               = "Sin estrategia"
 
+
+# ============================================================
+# DATACLASSES
+# ============================================================
 
 @dataclass
 class MADecision:
-    ma20_1h: float
-    ma40_1h: float
-    ma100_1h: float
-    ma200_1h: float
-    price: float
-    trend_1h: str
-    bullish_pts_1h: int
-    is_lateral_1h: bool
-    lateral_days_1h: int
-    price_above_all_1h: bool
-    price_below_all_1h: bool
-    bouncing_on: Optional[str]
-    bounce_dir: str
-    nearest_support: Optional[str]
+    ma20_1h:          float
+    ma40_1h:          float
+    ma100_1h:         float
+    ma200_1h:         float
+    price:            float
+    trend_1h:         str     # alcista_fuerte | alcista_parcial | bajista_fuerte | bajista_parcial | lateral
+    bullish_pts_1h:   int
+    is_lateral_1h:    bool
+    lateral_days_1h:  int
+    price_above_all:  bool
+    price_below_all:  bool
+    nearest_support:  Optional[str]
     nearest_resistance: Optional[str]
+    daily_trend:      str
+    daily_ma200:      float
     daily_blind_spots: list
-    daily_trend: str
-    daily_ma200: float
-    daily_warning: Optional[str]
-
+    daily_warning:    Optional[str]
 
 @dataclass
 class BBDecision:
-    upper_15m: float
-    lower_15m: float
-    mid_15m: float
-    bandwidth_15m: float
-    prev_bandwidth_15m: float
-    is_expanding_15m: bool
-    is_squeeze_15m: bool
-    is_high_volatility_15m: bool
-    bandwidth_pct_15m: float
-    price_above_upper_15m: bool
-    price_below_lower_15m: bool
-    price_near_upper_15m: bool
-    price_near_lower_15m: bool
-    expansion_pct_15m: float
-    bb_contracting_15m: bool
-    bb_expanding_1h: bool
-    bb_squeeze_1h: bool
-    bb_pct_1h: float
-    candle_type: str
-
+    upper_15m:          float
+    lower_15m:          float
+    mid_15m:            float
+    bandwidth_pct_15m:  float   # Percentil de volatilidad (0-100)
+    is_expanding_15m:   bool    # BB expandiendo ahora
+    is_squeeze_15m:     bool    # BB en squeeze
+    price_above_upper:  bool    # Precio salió banda superior
+    price_below_lower:  bool    # Precio salió banda inferior
+    candle_type:        str     # extreme_bullish | extreme_bearish | normal | doji
+    candle_body_pct:    float   # % del cuerpo vs rango total
+    bb_expanding_1h:    bool    # Confirmación en 1H también
+    volatility_level:   str     # ALTA | MEDIA | BAJA
 
 @dataclass
 class Alert:
-    ticker: str
-    timestamp: str
-    strategy: StrategyType
-    direction: SignalDirection
-    strength: SignalStrength
-    ma: MADecision
-    bb: BBDecision
-    score: float
-    price: float
-    explanation: str
-    recommendation: str
-    warning: Optional[str]
+    ticker:          str
+    timestamp:       str
+    strategy:        StrategyType
+    direction:       SignalDirection
+    strength:        SignalStrength
+    ma:              MADecision
+    bb:              BBDecision
+    score:           float
+    price:           float
+    explanation:     str
+    recommendation:  str
+    warning:         Optional[str]
     external_events: list
+    categoria:       str
+    earnings:        dict        # {has_earnings, days_away, date, warning, impact}
+    agotamiento:     dict        # {has_agotamiento, signals, direction, warning}
 
 
 # ============================================================
-# HELPER: VERIFICAR VENTANA DE APERTURA PARA SALTOS
-# FIX 2: Saltos SOLO validos 9:30am - 10:00am ET
+# CALENDARIO ECONÓMICO
 # ============================================================
 
-def is_gap_window():
-    et = pytz.timezone('US/Eastern')
+ECONOMIC_CALENDAR = {
+    "2026-04-29": {"name": "GDP Q1 Advance",       "impact": "alto"},
+    "2026-04-30": {"name": "FOMC Decision",         "impact": "alto"},
+    "2026-05-01": {"name": "Jobs Report NFP",       "impact": "alto"},
+    "2026-05-13": {"name": "CPI Report",            "impact": "alto"},
+    "2026-05-15": {"name": "OpEx Mensual",          "impact": "medio"},
+    "2026-06-10": {"name": "CPI Report",            "impact": "alto"},
+    "2026-06-17": {"name": "FOMC Decision",         "impact": "alto"},
+    "2026-06-19": {"name": "OpEx Mensual",          "impact": "medio"},
+    "2026-07-02": {"name": "Jobs Report NFP",       "impact": "alto"},
+    "2026-07-15": {"name": "CPI Report",            "impact": "alto"},
+    "2026-07-17": {"name": "OpEx Mensual",          "impact": "medio"},
+    "2026-07-29": {"name": "FOMC Decision",         "impact": "alto"},
+    "2026-08-12": {"name": "CPI Report",            "impact": "alto"},
+    "2026-09-09": {"name": "FOMC Decision",         "impact": "alto"},
+    "2026-10-07": {"name": "Jobs Report NFP",       "impact": "alto"},
+    "2026-10-14": {"name": "CPI Report",            "impact": "alto"},
+}
+
+def check_events() -> list:
+    et  = pytz.timezone('US/Eastern')
     now = datetime.now(et)
-    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    close_window = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    in_window = open_time <= now <= close_window
+    events = []
+    for i, label in {0: "HOY", 1: "MAÑANA", 2: "En 2 días"}.items():
+        d = (now + timedelta(days=i)).strftime("%Y-%m-%d")
+        if d in ECONOMIC_CALENDAR:
+            ev = ECONOMIC_CALENDAR[d]
+            if i == 0:
+                warn = f"⚠️ HOY: {ev['name']} — Máxima cautela, reducir tamaño"
+            elif i == 1:
+                warn = f"📅 MAÑANA: {ev['name']} — Reducir tamaño de posición"
+            else:
+                warn = f"📅 En 2 días: {ev['name']} — Tener en cuenta"
+            events.append({
+                "name":    ev["name"],
+                "impact":  ev["impact"],
+                "warning": warn,
+                "days":    i
+            })
+    return events
+
+
+# ============================================================
+# EARNINGS — DETECCIÓN AUTOMÁTICA POR TICKER
+# ============================================================
+
+def check_earnings(ticker: str) -> dict:
+    """
+    Consulta la próxima fecha de earnings del ticker via yfinance.
+    Si hay earnings en los próximos 3 días, genera advertencia.
+    Retorna dict con has_earnings, days_away, date, warning.
+    """
+    try:
+        stock    = yf.Ticker(ticker)
+        calendar = stock.calendar
+
+        # yfinance puede retornar dict o DataFrame según versión
+        earnings_date = None
+
+        if isinstance(calendar, dict):
+            # Versión nueva de yfinance
+            ed = calendar.get("Earnings Date")
+            if ed is not None:
+                if hasattr(ed, '__iter__') and not isinstance(ed, str):
+                    ed = list(ed)
+                    earnings_date = ed[0] if ed else None
+                else:
+                    earnings_date = ed
+
+        elif hasattr(calendar, 'columns'):
+            # Versión DataFrame
+            if "Earnings Date" in calendar.columns:
+                earnings_date = calendar["Earnings Date"].iloc[0]
+
+        if earnings_date is None:
+            return {"has_earnings": False}
+
+        # Normalizar a datetime naive para comparar
+        if hasattr(earnings_date, 'tzinfo') and earnings_date.tzinfo is not None:
+            earnings_date = earnings_date.replace(tzinfo=None)
+        if hasattr(earnings_date, 'to_pydatetime'):
+            earnings_date = earnings_date.to_pydatetime().replace(tzinfo=None)
+
+        et       = pytz.timezone('US/Eastern')
+        now      = datetime.now(et).replace(tzinfo=None)
+        days_away = (earnings_date.date() - now.date()).days
+
+        if days_away < 0 or days_away > 7:
+            return {"has_earnings": False}
+
+        date_str = earnings_date.strftime("%Y-%m-%d")
+
+        if days_away == 0:
+            warn   = f"🚨 EARNINGS HOY ({date_str}) — NO ENTRAR. IV Crush garantizado al cierre."
+            impact = "CRITICO"
+        elif days_away == 1:
+            warn   = f"⚠️ EARNINGS MAÑANA ({date_str}) — Máximo cuidado. Reducir tamaño al mínimo."
+            impact = "ALTO"
+        elif days_away <= 3:
+            warn   = f"📅 EARNINGS en {days_away} días ({date_str}) — Tener en cuenta. IV ya elevada."
+            impact = "MEDIO"
+        else:
+            warn   = f"📅 EARNINGS en {days_away} días ({date_str}) — En el radar."
+            impact = "BAJO"
+
+        return {
+            "has_earnings": True,
+            "days_away":    days_away,
+            "date":         date_str,
+            "warning":      warn,
+            "impact":       impact,
+        }
+
+    except Exception as e:
+        print(f"   [Earnings] Error consultando {ticker}: {e}")
+        return {"has_earnings": False}
+
+
+# ============================================================
+# AGOTAMIENTO DE TENDENCIA — ADVERTENCIA DE SALIDA
+# ============================================================
+
+def check_agotamiento(df_15m: pd.DataFrame, df_1h: pd.DataFrame,
+                       ma: MADecision, bb: BBDecision) -> dict:
+    """
+    Detecta señales de agotamiento de tendencia según el libro:
+    "Nada sube para siempre y nada baja para siempre."
+
+    Señales de agotamiento:
+    1. BB 15min contrayéndose después de expansión fuerte
+    2. Precio extendido lejos de MA200 1H (>5%)
+    3. Divergencia: precio hace nuevo máximo/mínimo pero BB se contrae
+    4. Velas doji consecutivas en 15min (indecisión)
+
+    NO bloquea la alerta, solo agrega advertencia.
+    """
+    signals  = []
+    is_agot  = False
+
+    try:
+        # ── Señal 1: BB contrayéndose ──
+        close = df_15m['Close']
+        sma   = close.rolling(20).mean()
+        std   = close.rolling(20).std()
+        upper = sma + 2 * std
+        lower = sma - 2 * std
+        bw    = ((upper - lower) / sma).dropna()
+
+        if len(bw) >= 4:
+            last4 = bw.tail(4).values
+            if all(last4[i] > last4[i+1] for i in range(3)):
+                signals.append("BB 15min contrayéndose — volatilidad cediendo")
+                is_agot = True
+
+        # ── Señal 2: Precio muy extendido de MA200 1H ──
+        price  = ma.price
+        ma200  = ma.ma200_1h
+        if ma200 > 0:
+            dist_pct = (price - ma200) / ma200 * 100
+            if dist_pct > 6 and ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
+                signals.append(f"Precio {dist_pct:.1f}% sobre MA200 1H — extendido al alza")
+                is_agot = True
+            elif dist_pct < -6 and ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
+                signals.append(f"Precio {abs(dist_pct):.1f}% bajo MA200 1H — extendido a la baja")
+                is_agot = True
+
+        # ── Señal 3: Dojis consecutivos en 15min ──
+        if len(df_15m) >= 3:
+            doji_count = 0
+            for i in range(-1, -4, -1):
+                row  = df_15m.iloc[i]
+                rng  = row['High'] - row['Low']
+                body = abs(row['Close'] - row['Open'])
+                if rng > 0 and body / rng < 0.15:
+                    doji_count += 1
+            if doji_count >= 2:
+                signals.append(f"{doji_count} dojis consecutivos en 15min — indecisión del mercado")
+                is_agot = True
+
+        if not is_agot:
+            return {"has_agotamiento": False}
+
+        # Dirección probable de agotamiento
+        if ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
+            agot_dir = "PUT"
+            msg      = "Tendencia alcista mostrando agotamiento."
+        elif ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
+            agot_dir = "CALL"
+            msg      = "Tendencia bajista mostrando agotamiento."
+        else:
+            agot_dir = "NEUTRAL"
+            msg      = "Mercado lateral mostrando agotamiento."
+
+        warning = (
+            f"⚠️ AGOTAMIENTO DETECTADO — {msg}\n"
+            + "\n".join([f"   • {s}" for s in signals])
+            + "\n   Del libro: 'Nada sube para siempre y nada baja para siempre.'"
+            + "\n   Si tienes posición abierta, considera protegerla o salir."
+        )
+
+        return {
+            "has_agotamiento": True,
+            "signals":         signals,
+            "direction":       agot_dir,
+            "warning":         warning,
+        }
+
+    except Exception as e:
+        print(f"   [Agotamiento] Error: {e}")
+        return {"has_agotamiento": False}
+
+
+# ============================================================
+# HELPER: VENTANA DE APERTURA PARA SALTOS (E3)
+# Solo válido 9:30am - 10:00am ET
+# ============================================================
+
+def is_gap_window() -> bool:
+    et   = pytz.timezone('US/Eastern')
+    now  = datetime.now(et)
+    open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now.replace(hour=10, minute=0,  second=0, microsecond=0)
+    in_window = open_t <= now <= close_t
     if not in_window:
-        print(f"  Gap window cerrada ({now.strftime('%I:%M %p ET')}) -- saltos solo 9:30-10:00am")
+        print(f"   Gap window cerrada ({now.strftime('%I:%M %p ET')}) — E3 solo 9:30-10:00am")
     return in_window
 
 
 # ============================================================
-# MEDIAS MOVILES - DECISION EN 1H / DIARIO - PUNTOS CIEGOS
+# MEDIAS MÓVILES — DECISIÓN EN 1H
 # ============================================================
 
-def analyze_mas(df_1h, df_daily):
+def analyze_mas(df_1h: pd.DataFrame, df_daily: pd.DataFrame) -> MADecision:
+    """Analiza MAs en 1H (decisión) y diario (contexto/puntos ciegos)."""
+
     if len(df_1h) < 200:
-        price = df_1h['Close'].iloc[-1] if len(df_1h) > 0 else 0
+        price = float(df_1h['Close'].iloc[-1]) if len(df_1h) > 0 else 0.0
         return _empty_ma(price)
 
-    close_1h = df_1h['Close']
-    price = close_1h.iloc[-1]
-    ma20  = close_1h.rolling(20).mean().iloc[-1]
-    ma40  = close_1h.rolling(40).mean().iloc[-1]
-    ma100 = close_1h.rolling(100).mean().iloc[-1]
-    ma200 = close_1h.rolling(200).mean().iloc[-1]
+    close = df_1h['Close']
+    price = float(close.iloc[-1])
 
+    ma20  = float(close.rolling(20).mean().iloc[-1])
+    ma40  = float(close.rolling(40).mean().iloc[-1])
+    ma100 = float(close.rolling(100).mean().iloc[-1])
+    ma200 = float(close.rolling(200).mean().iloc[-1])
+
+    # Tendencia 1H: cuántas MAs están en orden alcista
     bp = sum([ma20 > ma40, ma40 > ma100, ma100 > ma200])
-    trend = {3: "alcista_fuerte", 2: "alcista_parcial",
-             1: "bajista_parcial", 0: "bajista_fuerte"}.get(bp, "lateral")
+    trend_map = {
+        3: "alcista_fuerte",
+        2: "alcista_parcial",
+        1: "bajista_parcial",
+        0: "bajista_fuerte"
+    }
+    trend_1h = trend_map.get(bp, "lateral")
 
+    # Canal lateral
     is_lat, lat_days = _detect_lateral(df_1h)
-    bouncing, bounce_dir = _detect_bounce(df_1h, ma20, ma40, ma100, ma200, price)
+
+    # Soporte / Resistencia más cercanos
     support, resistance = _nearest_levels(price, ma20, ma40, ma100, ma200)
 
-    blind_spots = []
+    # ── Diario: contexto y puntos ciegos ──
+    blind_spots   = []
     daily_warning = None
-    d_ma200 = price
-    d_trend = "desconocido"
+    d_ma200       = price
+    d_trend       = "desconocido"
 
     if len(df_daily) >= 200:
-        d_close = df_daily['Close']
-        d_ma20  = d_close.rolling(20).mean().iloc[-1]
-        d_ma40  = d_close.rolling(40).mean().iloc[-1]
-        d_ma100 = d_close.rolling(100).mean().iloc[-1]
-        d_ma200 = d_close.rolling(200).mean().iloc[-1]
+        dc     = df_daily['Close']
+        d_ma20  = float(dc.rolling(20).mean().iloc[-1])
+        d_ma40  = float(dc.rolling(40).mean().iloc[-1])
+        d_ma100 = float(dc.rolling(100).mean().iloc[-1])
+        d_ma200 = float(dc.rolling(200).mean().iloc[-1])
 
-        d_bp = sum([d_ma20 > d_ma40, d_ma40 > d_ma100, d_ma100 > d_ma200])
-        d_trend = {3: "alcista_fuerte", 2: "alcista_parcial",
-                   1: "bajista_parcial", 0: "bajista_fuerte"}.get(d_bp, "lateral")
+        d_bp    = sum([d_ma20 > d_ma40, d_ma40 > d_ma100, d_ma100 > d_ma200])
+        d_trend = trend_map.get(d_bp, "lateral")
 
-        daily_levels = {
-            "MA20 Diario": d_ma20, "MA40 Diario": d_ma40,
-            "MA100 Diario": d_ma100, "MA200 Diario (Institucional)": d_ma200
-        }
-        warnings = []
-        for name, val in daily_levels.items():
-            dist_pct = abs(price - val) / price * 100
-            if dist_pct < 1.5:
-                direction_txt = "RESISTENCIA" if val > price else "SOPORTE"
-                blind_spots.append(f"{name}: ${val:.2f} ({direction_txt})")
-                warnings.append(f"PUNTO CIEGO: {name} en ${val:.2f} -- {direction_txt}")
-        if warnings:
-            daily_warning = " | ".join(warnings)
+        warns = []
+        for name, val in [("MA20D", d_ma20), ("MA40D", d_ma40),
+                           ("MA100D", d_ma100), ("MA200D (Institucional)", d_ma200)]:
+            dist = abs(price - val) / price * 100
+            if dist < 1.5:
+                rol = "RESISTENCIA" if val > price else "SOPORTE"
+                blind_spots.append(f"{name}: ${val:.2f} ({rol})")
+                warns.append(f"PUNTO CIEGO DIARIO: {name} ${val:.2f} — {rol}")
+
+        if warns:
+            daily_warning = " | ".join(warns)
 
     return MADecision(
-        ma20_1h=round(ma20, 2), ma40_1h=round(ma40, 2),
-        ma100_1h=round(ma100, 2), ma200_1h=round(ma200, 2),
-        price=round(price, 2), trend_1h=trend, bullish_pts_1h=bp,
-        is_lateral_1h=is_lat, lateral_days_1h=lat_days,
-        price_above_all_1h=price > max(ma20, ma40, ma100, ma200),
-        price_below_all_1h=price < min(ma20, ma40, ma100, ma200),
-        bouncing_on=bouncing, bounce_dir=bounce_dir,
-        nearest_support=support, nearest_resistance=resistance,
-        daily_blind_spots=blind_spots, daily_trend=d_trend,
-        daily_ma200=round(d_ma200, 2), daily_warning=daily_warning
+        ma20_1h=round(ma20, 2),
+        ma40_1h=round(ma40, 2),
+        ma100_1h=round(ma100, 2),
+        ma200_1h=round(ma200, 2),
+        price=round(price, 2),
+        trend_1h=trend_1h,
+        bullish_pts_1h=bp,
+        is_lateral_1h=is_lat,
+        lateral_days_1h=lat_days,
+        price_above_all=price > max(ma20, ma40, ma100, ma200),
+        price_below_all=price < min(ma20, ma40, ma100, ma200),
+        nearest_support=support,
+        nearest_resistance=resistance,
+        daily_trend=d_trend,
+        daily_ma200=round(d_ma200, 2),
+        daily_blind_spots=blind_spots,
+        daily_warning=daily_warning,
     )
 
 
-def _detect_lateral(df, min_days=10):
+def _detect_lateral(df: pd.DataFrame, min_days: int = 10):
+    """
+    Detecta canal lateral: las 4 MAs entrelazadas con spread < 2.5%
+    durante al menos min_days días en 1H.
+    """
     ma20  = df['Close'].rolling(20).mean()
     ma40  = df['Close'].rolling(40).mean()
     ma100 = df['Close'].rolling(100).mean()
     ma200 = df['Close'].rolling(200).mean()
-    bars_per_day = 7
+
+    bars_per_day = 7  # barras de 1H por día de mercado
     count = 0
+
     for i in range(-1, -len(df), -1):
         try:
             mas = [ma20.iloc[i], ma40.iloc[i], ma100.iloc[i], ma200.iloc[i]]
-            if any(pd.isna(m) for m in mas): break
+            if any(pd.isna(m) for m in mas):
+                break
             spread = (max(mas) - min(mas)) / df['Close'].iloc[i] * 100
-            if spread < 3.0: count += 1
-            else: break
-        except: break
+            if spread < 2.5:
+                count += 1
+            else:
+                break
+        except:
+            break
+
     days = count // max(bars_per_day, 1)
     return days >= min_days, days
-
-
-def _detect_bounce(df, ma20, ma40, ma100, ma200, price):
-    lookback = min(5, len(df))
-    if lookback < 2: return None, "none"
-    lows  = df['Low'].iloc[-lookback:].values
-    highs = df['High'].iloc[-lookback:].values
-    levels = {"MA20": ma20, "MA40": ma40, "MA100": ma100, "MA200": ma200}
-    for name, val in levels.items():
-        if any(abs(l - val) / val < 0.005 for l in lows) and price > val:
-            return name, "up"
-        if any(abs(h - val) / val < 0.005 for h in highs) and price < val:
-            return name, "down"
-    return None, "none"
 
 
 def _nearest_levels(price, ma20, ma40, ma100, ma200):
     levels = {"MA20": ma20, "MA40": ma40, "MA100": ma100, "MA200": ma200}
     supports    = {k: v for k, v in levels.items() if v < price}
     resistances = {k: v for k, v in levels.items() if v > price}
-    return (max(supports, key=supports.get) if supports else None,
-            min(resistances, key=resistances.get) if resistances else None)
+    sup = max(supports,    key=supports.get)    if supports    else None
+    res = min(resistances, key=resistances.get) if resistances else None
+    return sup, res
 
 
-def _empty_ma(price):
+def _empty_ma(price: float) -> MADecision:
     return MADecision(
         ma20_1h=price, ma40_1h=price, ma100_1h=price, ma200_1h=price,
         price=price, trend_1h="lateral", bullish_pts_1h=0,
         is_lateral_1h=False, lateral_days_1h=0,
-        price_above_all_1h=False, price_below_all_1h=False,
-        bouncing_on=None, bounce_dir="none",
+        price_above_all=False, price_below_all=False,
         nearest_support=None, nearest_resistance=None,
-        daily_blind_spots=[], daily_trend="desconocido",
-        daily_ma200=price, daily_warning=None
+        daily_trend="desconocido", daily_ma200=price,
+        daily_blind_spots=[], daily_warning=None,
     )
 
 
 # ============================================================
-# BOLLINGER BANDS - DECISION EN 15MIN
+# BOLLINGER BANDS — ENTRADA EN 15MIN
 # ============================================================
 
-def analyze_bb(df_15m, df_1h):
-    def _calc_bb(df, length=20, num_std=2.0):
+def analyze_bb(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> BBDecision:
+    """
+    Analiza BB en 15min (entrada) y confirma en 1H.
+    Volatilidad real = percentil > 60 + BB expandiendo.
+    Tres niveles: ALTA (>75), MEDIA (60-75), BAJA (<60).
+    """
+    def _calc(df, length=20, std_mult=2.0):
         if len(df) < length + 5:
-            c = df['Close'].iloc[-1] if len(df) > 0 else 0
-            return c, c, c, 0, 0, False, False, False, 50.0, False, False, False, False, 0, False
-        close = df['Close']
-        c = close.iloc[-1]
-        sma = close.rolling(length).mean()
-        std = close.rolling(length).std()
-        upper = sma + num_std * std
-        lower = sma - num_std * std
-        cu = upper.iloc[-1]; cl = lower.iloc[-1]; cm = sma.iloc[-1]
-        bw = (cu - cl) / cm if cm > 0 else 0
-        prev_bw = ((upper.iloc[-2] - lower.iloc[-2]) / sma.iloc[-2]) if len(sma) > 1 and sma.iloc[-2] > 0 else bw
-        expanding = bw > prev_bw * 1.05
-        exp_pct = ((bw - prev_bw) / prev_bw * 100) if prev_bw > 0 else 0
-        bw_series = ((upper - lower) / sma).dropna()
-        avg_bw = bw_series.rolling(20).mean().iloc[-1] if len(bw_series) >= 20 else bw
-        squeeze = bw < avg_bw * 0.75
-        recent = bw_series.tail(50)
-        pct = float((recent < bw).mean() * 100) if len(recent) > 0 else 50.0
-        high_vol = pct > 60 and expanding
-        above = c > cu; below = c < cl
-        band_range = cu - cl
-        near_upper = (not above) and band_range > 0 and (cu - c) < band_range * 0.08 and expanding
-        near_lower = (not below) and band_range > 0 and (c - cl) < band_range * 0.08 and expanding
-        contracting = False
-        if len(bw_series) >= 4:
-            last = bw_series.tail(4).values
-            if all(last[i] > last[i + 1] for i in range(len(last) - 1)):
-                contracting = True
-        return cu, cl, cm, bw, prev_bw, expanding, squeeze, high_vol, pct, above, below, near_upper, near_lower, exp_pct, contracting
+            c = float(df['Close'].iloc[-1]) if len(df) > 0 else 0.0
+            return dict(
+                upper=c, lower=c, mid=c,
+                bw=0.0, prev_bw=0.0,
+                expanding=False, squeeze=False,
+                pct=0.0, above=False, below=False,
+                exp_pct=0.0
+            )
 
-    (u15, l15, m15, bw15, pbw15, exp15, sq15, hv15, pct15,
-     ab15, bl15, nu15, nl15, epct15, con15) = _calc_bb(df_15m)
-    (u1h, l1h, m1h, bw1h, pbw1h, exp1h, sq1h, hv1h, pct1h,
-     ab1h, bl1h, nu1h, nl1h, epct1h, con1h) = _calc_bb(df_1h)
-    candle = _candle_type(df_15m)
+        close = df['Close']
+        c     = float(close.iloc[-1])
+        sma   = close.rolling(length).mean()
+        std   = close.rolling(length).std()
+        upper = sma + std_mult * std
+        lower = sma - std_mult * std
+
+        cu = float(upper.iloc[-1])
+        cl = float(lower.iloc[-1])
+        cm = float(sma.iloc[-1])
+
+        bw      = (cu - cl) / cm if cm > 0 else 0.0
+        prev_bw = float((upper.iloc[-2] - lower.iloc[-2]) / sma.iloc[-2]) \
+                  if len(sma) > 1 and float(sma.iloc[-2]) > 0 else bw
+
+        expanding = bw > prev_bw * 1.03   # expandiendo al menos 3%
+        exp_pct   = (bw - prev_bw) / prev_bw * 100 if prev_bw > 0 else 0.0
+
+        bw_series = ((upper - lower) / sma).dropna()
+        avg_bw    = float(bw_series.rolling(20).mean().iloc[-1]) \
+                    if len(bw_series) >= 20 else bw
+        squeeze   = bw < avg_bw * 0.75
+
+        recent = bw_series.tail(60)
+        pct    = float((recent < bw).mean() * 100) if len(recent) > 0 else 50.0
+
+        return dict(
+            upper=cu, lower=cl, mid=cm,
+            bw=bw, prev_bw=prev_bw,
+            expanding=expanding, squeeze=squeeze,
+            pct=pct, above=c > cu, below=c < cl,
+            exp_pct=exp_pct,
+        )
+
+    b15 = _calc(df_15m)
+    b1h = _calc(df_1h)
+
+    # Nivel de volatilidad
+    pct = b15["pct"]
+    expanding = b15["expanding"]
+
+    if pct > 75 and expanding:
+        vol_level = "ALTA"
+    elif pct >= 60 and expanding:
+        vol_level = "MEDIA"
+    else:
+        vol_level = "BAJA"
+
+    # Tipo de vela en 15min
+    candle_type, body_pct = _candle_analysis(df_15m)
 
     return BBDecision(
-        upper_15m=round(u15, 2), lower_15m=round(l15, 2), mid_15m=round(m15, 2),
-        bandwidth_15m=round(bw15, 6), prev_bandwidth_15m=round(pbw15, 6),
-        is_expanding_15m=exp15, is_squeeze_15m=sq15,
-        is_high_volatility_15m=hv15, bandwidth_pct_15m=round(pct15, 1),
-        price_above_upper_15m=ab15, price_below_lower_15m=bl15,
-        price_near_upper_15m=nu15, price_near_lower_15m=nl15,
-        expansion_pct_15m=round(epct15, 2), bb_contracting_15m=con15,
-        bb_expanding_1h=exp1h, bb_squeeze_1h=sq1h, bb_pct_1h=round(pct1h, 1),
-        candle_type=candle
+        upper_15m=round(b15["upper"], 2),
+        lower_15m=round(b15["lower"], 2),
+        mid_15m=round(b15["mid"], 2),
+        bandwidth_pct_15m=round(pct, 1),
+        is_expanding_15m=expanding,
+        is_squeeze_15m=b15["squeeze"],
+        price_above_upper=b15["above"],
+        price_below_lower=b15["below"],
+        candle_type=candle_type,
+        candle_body_pct=round(body_pct, 1),
+        bb_expanding_1h=b1h["expanding"],
+        volatility_level=vol_level,
     )
 
 
-def _candle_type(df):
-    if len(df) == 0: return "normal"
+def _candle_analysis(df: pd.DataFrame):
+    """Analiza la vela de confirmación. Cuerpo > 70% = extrema (requisito del libro)."""
+    if len(df) == 0:
+        return "normal", 0.0
+
     last = df.iloc[-1]
-    op, hi, lo, cl = last['Open'], last['High'], last['Low'], last['Close']
-    rng = hi - lo
-    if rng == 0: return "doji"
-    body = abs(cl - op) / rng * 100
-    if body > 70:
-        return "extreme_bullish" if cl > op else "extreme_bearish"
-    return "doji" if body < 15 else "normal"
+    op, hi, lo, cl = float(last['Open']), float(last['High']), \
+                     float(last['Low']),  float(last['Close'])
+    rng  = hi - lo
+    if rng == 0:
+        return "doji", 0.0
+
+    body_pct = abs(cl - op) / rng * 100
+
+    if body_pct < 15:
+        return "doji", body_pct
+    elif body_pct > 70:
+        return ("extreme_bullish" if cl > op else "extreme_bearish"), body_pct
+    else:
+        return ("normal_bullish" if cl > op else "normal_bearish"), body_pct
 
 
 # ============================================================
-# CHOPPINESS
+# CHOPPINESS INDEX
 # ============================================================
 
-def calc_choppiness(df_1h, n=14):
-    if len(df_1h) < n + 2: return 50.0
+def calc_choppiness(df_1h: pd.DataFrame, n: int = 14) -> float:
+    """Chop > 61.8 = mercado sin dirección clara → no operar."""
+    if len(df_1h) < n + 2:
+        return 50.0
     try:
         hi = df_1h['High'].tail(n + 1)
         lo = df_1h['Low'].tail(n + 1)
         cl = df_1h['Close'].tail(n + 1)
-        tr = pd.concat([hi - lo, (hi - cl.shift(1)).abs(), (lo - cl.shift(1)).abs()], axis=1).max(axis=1)
-        atr_sum = tr.tail(n).sum()
-        hl = hi.tail(n).max() - lo.tail(n).min()
-        if hl == 0: return 50.0
-        return round(float(100 * np.log10(atr_sum / hl) / np.log10(n)), 1)
-    except: return 50.0
+        tr = pd.concat([
+            hi - lo,
+            (hi - cl.shift(1)).abs(),
+            (lo - cl.shift(1)).abs()
+        ], axis=1).max(axis=1)
+        atr_sum = float(tr.tail(n).sum())
+        hl      = float(hi.tail(n).max() - lo.tail(n).min())
+        if hl == 0:
+            return 50.0
+        return round(100 * np.log10(atr_sum / hl) / np.log10(n), 1)
+    except:
+        return 50.0
 
 
 # ============================================================
-# EVENTOS EXTERNOS
+# ANÁLISIS DE GAPS — ESTRATEGIA 3
+# Solo válido en ventana 9:30-10:00am ET
 # ============================================================
 
-ECONOMIC_CALENDAR = {
-    "2026-04-30": {"name": "FOMC Decision", "impact": "alto"},
-    "2026-05-01": {"name": "Jobs Report NFP", "impact": "alto"},
-    "2026-05-06": {"name": "FOMC Decision", "impact": "alto"},
-    "2026-05-13": {"name": "CPI Report", "impact": "alto"},
-    "2026-05-15": {"name": "OpEx Mensual", "impact": "medio"},
-    "2026-06-10": {"name": "CPI Report", "impact": "alto"},
-    "2026-06-17": {"name": "FOMC Decision", "impact": "alto"},
-    "2026-06-19": {"name": "OpEx Mensual", "impact": "medio"},
-    "2026-07-02": {"name": "Jobs Report NFP", "impact": "alto"},
-    "2026-07-15": {"name": "CPI Report", "impact": "alto"},
-    "2026-07-17": {"name": "OpEx Mensual", "impact": "medio"},
-    "2026-07-29": {"name": "FOMC Decision", "impact": "alto"},
-}
-
-
-def check_events():
-    et = pytz.timezone('US/Eastern')
-    now = datetime.now(et)
-    events = []
-    for i, label in {0: "HOY", 1: "MANANA", 2: "En 2 dias"}.items():
-        d = (now + timedelta(days=i)).strftime("%Y-%m-%d")
-        if d in ECONOMIC_CALENDAR:
-            ev = ECONOMIC_CALENDAR[d]
-            if i == 0:   warn = f"HOY: {ev['name']} -- Maxima cautela"
-            elif i == 1: warn = f"MANANA: {ev['name']} -- Reducir tamano"
-            else:        warn = f"En 2 dias: {ev['name']} -- Tener en cuenta"
-            events.append({"name": ev['name'], "impact": ev['impact'],
-                           "warning": warn, "days": i})
-    return events
-
-
-# ============================================================
-# GAPS - ESTRATEGIA 3
-# FIX 2: Solo valido 9:30-10:00am ET
-# FIX 3: MAs 1H deben confirmar la direccion del gap
-# ============================================================
-
-def analyze_gaps(df_daily, ma):
+def analyze_gaps(df_daily: pd.DataFrame, ma: MADecision) -> dict:
+    """
+    Detecta saltos (gaps) según el libro:
+    - Gap > 0.5% vs cierre anterior
+    - MAs 1H deben confirmar la dirección
+    - Regla 4: gap revertido = cambio de tendencia
+    """
     if len(df_daily) < 2:
         return {"has_gap": False}
 
-    today_open  = df_daily['Open'].iloc[-1]
-    today_close = df_daily['Close'].iloc[-1]
-    yest_close  = df_daily['Close'].iloc[-2]
+    today_open  = float(df_daily['Open'].iloc[-1])
+    today_close = float(df_daily['Close'].iloc[-1])
+    yest_close  = float(df_daily['Close'].iloc[-2])
 
     size = today_open - yest_close
-    pct  = (size / yest_close * 100) if yest_close > 0 else 0
+    pct  = abs(size / yest_close * 100) if yest_close > 0 else 0.0
 
-    if abs(pct) <= 0.3:
+    # Umbral mínimo: 0.5% (más estricto que antes)
+    if pct < 0.5:
         return {"has_gap": False}
 
     direction = "up" if size > 0 else "down"
 
+    # MAs 1H confirman la dirección del gap
     mas_confirm = (
         (direction == "up"   and ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]) or
         (direction == "down" and ma.trend_1h in ["bajista_fuerte", "bajista_parcial"])
     )
 
-    is_reversal = (
-        (direction == "up"   and ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]) or
-        (direction == "down" and ma.trend_1h in ["alcista_fuerte", "alcista_parcial"])
-    )
-
+    # Regla 4: gap que revirtió completamente = cambio de tendencia
     gap_filled = (
         (direction == "up"   and today_close < yest_close) or
         (direction == "down" and today_close > yest_close)
     )
 
-    if direction == "up" and today_close > today_open:     second_prob = 0.90
+    # Probabilidad de segundo salto (Regla 2 del libro)
+    if direction == "up"   and today_close > today_open: second_prob = 0.90
     elif direction == "down" and today_close < today_open: second_prob = 0.90
-    elif gap_filled:                                       second_prob = 0.10
-    else:                                                  second_prob = 0.50
+    elif gap_filled:                                        second_prob = 0.10
+    else:                                                   second_prob = 0.50
 
     return {
-        "has_gap": True,
-        "direction": direction,
-        "size": round(abs(size), 2),
-        "pct": round(abs(pct), 3),
+        "has_gap":     True,
+        "direction":   direction,
+        "size":        round(abs(size), 2),
+        "pct":         round(pct, 3),
         "mas_confirm": mas_confirm,
-        "is_reversal": is_reversal,
-        "gap_filled": gap_filled,
-        "second_prob": second_prob
+        "gap_filled":  gap_filled,
+        "second_prob": second_prob,
     }
 
 
 # ============================================================
-# SCORING
+# SCORING — FIEL AL LIBRO
 # ============================================================
 
-def calc_score(ma, bb, gap, chop):
-    score = 0.0
+def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
+    """
+    Score 0-100. Mínimo 55 para alertar.
+
+    Pesos:
+      BB 15min (volatilidad real) → 40 pts  (ES LA CONFIRMACIÓN DE ENTRADA)
+      MAs 1H   (tendencia)        → 45 pts  (ES LA DECISIÓN)
+      Diario   (contexto)         → 15 pts  (ES EL CONTEXTO)
+
+    Penalización:
+      Choppy > 61.8               → score * 0.4
+    """
+    score   = 0.0
     bullish = 0
     bearish = 0
 
-    # BB 15min -- hasta 50 pts
-    if bb.is_high_volatility_15m:
-        score += 20
-        if bb.price_above_upper_15m:
-            score += 25; bearish += 2
-        elif bb.price_below_lower_15m:
-            score += 25; bullish += 2
-        elif bb.price_near_upper_15m:
-            score += 12; bearish += 1
-        elif bb.price_near_lower_15m:
-            score += 12; bullish += 1
-    elif bb.is_expanding_15m:
-        score += 12
+    # ── BB 15min — hasta 40 pts ──
+    # Volatilidad ALTA (percentil >75 + expandiendo) = ENTRADA del libro
+    if bb.volatility_level == "ALTA":
+        score += 30
+        if bb.price_above_upper:
+            score += 10; bearish += 2   # sobreextensión → PUT
+        elif bb.price_below_lower:
+            score += 10; bullish += 2   # sobreextensión → CALL
+        elif bb.candle_body_pct > 70:
+            score += 7                  # vela extrema = confirmación libro
+    elif bb.volatility_level == "MEDIA":
+        score += 18
+        if bb.price_above_upper or bb.price_below_lower:
+            score += 5
     elif bb.is_squeeze_15m:
-        score += 8
+        score += 8  # squeeze = vigilar pero no entrar aún
 
-    # MAs 1H -- hasta 40 pts
+    # ── MAs 1H — hasta 45 pts ──
     if ma.trend_1h == "alcista_fuerte":
-        score += 40; bullish += 3
+        score += 45; bullish += 3
     elif ma.trend_1h == "alcista_parcial":
-        score += 28; bullish += 2
+        score += 30; bullish += 2
     elif ma.trend_1h == "bajista_fuerte":
-        score += 40; bearish += 3
+        score += 45; bearish += 3
     elif ma.trend_1h == "bajista_parcial":
-        score += 28; bearish += 2
+        score += 30; bearish += 2
     elif ma.is_lateral_1h:
-        score += 15
+        score += 18   # canal = potencial E1/E2
 
-    if ma.price_above_all_1h:
-        score = min(score + 5, 90); bullish += 1
-    elif ma.price_below_all_1h:
-        score = min(score + 5, 90); bearish += 1
+    if ma.price_above_all:
+        score = min(score + 5, 95); bullish += 1
+    elif ma.price_below_all:
+        score = min(score + 5, 95); bearish += 1
 
-    # Diario -- hasta 10 pts
+    # ── Diario — hasta 15 pts ──
     if ma.daily_trend == "alcista_fuerte":
-        score += 10; bullish += 1
+        score += 15; bullish += 1
     elif ma.daily_trend == "alcista_parcial":
-        score += 6;  bullish += 1
+        score += 9;  bullish += 1
     elif ma.daily_trend == "bajista_fuerte":
-        score += 10; bearish += 1
+        score += 15; bearish += 1
     elif ma.daily_trend == "bajista_parcial":
-        score += 6;  bearish += 1
+        score += 9;  bearish += 1
 
-    # Penalizacion choppy
+    # ── Penalización choppy ──
     if chop > 61.8:
-        score *= 0.5
+        score *= 0.4
 
-    direction = "alcista" if bullish > bearish else "bajista" if bearish > bullish else "mixto"
+    direction = (
+        "alcista" if bullish > bearish else
+        "bajista" if bearish > bullish else
+        "mixto"
+    )
+
     return round(score, 1), direction
 
 
-def score_to_strength(score):
-    if score > 60:   return SignalStrength.FUERTE
-    elif score >= 50: return SignalStrength.MODERADO
-    else:             return SignalStrength.DEBIL
+def score_to_strength(score: float) -> SignalStrength:
+    if score >= 70:
+        return SignalStrength.FUERTE
+    elif score >= 55:
+        return SignalStrength.MODERADO
+    else:
+        return SignalStrength.DEBIL
 
 
 # ============================================================
-# IDENTIFICADOR DE ESTRATEGIAS
+# IDENTIFICADOR DE ESTRATEGIAS — SOLO LAS 3 DEL LIBRO
 # ============================================================
 
-def identify_strategy(ma, bb, gap, chop, score, pan_direction):
+def identify_strategy(ma: MADecision, bb: BBDecision, gap: dict,
+                       chop: float, score: float, pan_dir: str):
+    """
+    Identifica ÚNICAMENTE las 3 estrategias del libro.
+    Retorna: (StrategyType, SignalDirection, SignalStrength, explanation)
+    """
 
-    # FIX 4: Mercado choppy = no alerta
+    # Regla 0: Mercado choppy → no operar
     if chop > 61.8:
+        print(f"   Descartado: mercado choppy ({chop})")
         return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
 
-    # FIX 1: Score < 50 SIN EXCEPCIONES
-    if score < 50:
+    # Regla 1: Score mínimo 55
+    if score < 55:
+        print(f"   Descartado: score bajo ({score})")
+        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+
+    # Regla 2: Volatilidad BAJA → no alertar (sin excepciones)
+    if bb.volatility_level == "BAJA" and not bb.is_squeeze_15m:
+        print(f"   Descartado: volatilidad baja (percentil {bb.bandwidth_pct_15m:.0f}%)")
         return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
 
     strength = score_to_strength(score)
 
-    # Agotamiento
-    if bb.bb_contracting_15m and bb.bandwidth_pct_15m < 35:
-        exp = (
-            "AGOTAMIENTO DETECTADO.\n"
-            "BB 15min contrayendose -- volatilidad cediendo.\n"
-            f"MAs 1H: {ma.trend_1h}\n"
-            "Del libro: Nada sube para siempre y nada baja para siempre.\n"
-            "Si tienes posicion abierta, considera salir."
-        )
-        d = SignalDirection.PUT if pan_direction == "alcista" else SignalDirection.CALL
-        return StrategyType.AGOTAMIENTO, d, SignalStrength.MODERADO, exp
-
-    # FIX 2: Estrategia 3 SOLO en ventana de apertura 9:30-10:00am
+    # ── E3: SALTOS — Solo en ventana 9:30-10:00am ET ──
     if gap.get("has_gap") and is_gap_window():
-        result = _strategy_saltos(gap, ma, bb, score)
+        result = _strategy_e3_saltos(gap, ma, bb, score, strength)
         if result[0] != StrategyType.NONE:
             return result
 
-    # Estrategia 1 y 2: Canal Lateral
+    # ── E1 / E2: CANAL LATERAL ──
+    # Requiere canal >= 10 días + ruptura + volatilidad ALTA + vela extrema
     if ma.is_lateral_1h and ma.lateral_days_1h >= 10:
-        result = _strategy_canal(ma, bb, score)
+        result = _strategy_canal(ma, bb, score, strength)
         if result[0] != StrategyType.NONE:
             return result
 
-    # BB Salida de Banda
-    if bb.price_above_upper_15m or bb.price_below_lower_15m:
-        result = _strategy_bb_salida(ma, bb, score, pan_direction)
-        if result[0] != StrategyType.NONE:
-            return result
-
-    # BB Acercamiento
-    if bb.price_near_upper_15m or bb.price_near_lower_15m:
-        result = _strategy_bb_acercamiento(ma, bb, score, pan_direction)
-        if result[0] != StrategyType.NONE:
-            return result
-
-    # Rebote en MA
-    if ma.bouncing_on and bb.is_expanding_15m:
-        result = _strategy_rebote(ma, bb, score)
-        if result[0] != StrategyType.NONE:
-            return result
-
-    # Squeeze
-    if bb.is_squeeze_15m:
-        days_txt = f" -- canal lateral {ma.lateral_days_1h} dias" if ma.is_lateral_1h else ""
-        exp = (
-            f"SQUEEZE en BB 15min -- explosion inminente{days_txt}.\n"
-            f"MAs 1H: {ma.trend_1h}\n"
-            f"Diario: {ma.daily_trend}\n"
-            "Esperar BB expandiendo con alta volatilidad antes de entrar."
-        )
-        return StrategyType.SQUEEZE, SignalDirection.NEUTRAL, SignalStrength.MODERADO, exp
+        # Squeeze en canal = monitorear
+        if bb.is_squeeze_15m and score >= 55:
+            exp = (
+                f"SQUEEZE en canal lateral de {ma.lateral_days_1h} días.\n"
+                f"MAs 1H: {ma.lateral_days_1h} días entrelazadas (DECISIÓN)\n"
+                f"BB 15min: squeeze — explosión inminente\n"
+                f"Volatilidad: {bb.bandwidth_pct_15m:.0f}% percentil\n"
+                f"Score: {score}/100\n\n"
+                "ACCIÓN: Esperar BB expandiendo + vela extrema antes de entrar.\n"
+                "Puede ser E1 (CALL) o E2 (PUT) dependiendo de la dirección de ruptura."
+            )
+            return StrategyType.SQUEEZE_CANAL, SignalDirection.NEUTRAL, SignalStrength.MODERADO, exp
 
     return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
 
 
-def _strategy_saltos(gap, ma, bb, score):
-    # Regla 4: gap revertido = cambio de tendencia
+def _strategy_e3_saltos(gap: dict, ma: MADecision, bb: BBDecision,
+                         score: float, strength: SignalStrength):
+    """
+    Estrategia 3 del libro — Saltos en apertura.
+
+    Reglas:
+    1. Gap > 0.5% vs cierre anterior
+    2. MAs 1H confirman la dirección (FIX 3)
+    3. BB 15min con volatilidad MEDIA o ALTA
+    4. Regla 4: gap revertido = cambio de tendencia
+    """
+
+    # Regla 4 del libro: gap que se revirtió completamente = cambio de tendencia
     if gap["gap_filled"]:
         d = SignalDirection.CALL if gap["direction"] == "down" else SignalDirection.PUT
         exp = (
-            "CAMBIO DE TENDENCIA INMINENTE -- Regla 4 del libro.\n"
-            f"Gap {gap['direction'].upper()} de ${gap['size']} que se revirtio al cierre.\n"
-            f"MAs 1H: {ma.trend_1h} | Diario: {ma.daily_trend}\n"
-            "NO continuar en la direccion original del gap."
+            "E3 — CAMBIO DE TENDENCIA (Regla 4 del libro).\n\n"
+            f"Gap {gap['direction'].upper()} de ${gap['size']} ({gap['pct']:.2f}%)\n"
+            "que se REVIRTIÓ completamente al cierre.\n\n"
+            f"MAs 1H: {ma.trend_1h}\n"
+            f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% — {bb.volatility_level}\n"
+            f"Score: {score}/100\n\n"
+            "Del libro: cuando el gap se revierte por completo,\n"
+            "indica un inminente cambio de tendencia.\n"
+            "NO continuar en la dirección original del gap."
         )
-        return StrategyType.SALTO_CAMBIO_TENDENCIA, d, SignalStrength.MODERADO, exp
+        return StrategyType.E3_CAMBIO_TENDENCIA, d, SignalStrength.MODERADO, exp
 
-    second = f"\nProb. segundo salto manana: {int(gap['second_prob'] * 100)}%" if gap["second_prob"] >= 0.5 else ""
-    strength = score_to_strength(score)
+    # Regla 3 (FIX): MAs deben confirmar la dirección del gap
+    if not gap["mas_confirm"]:
+        dir_txt = "alcista" if gap["direction"] == "up" else "bajista"
+        print(f"   E3 descartado: gap {dir_txt} pero MAs {ma.trend_1h} no confirman")
+        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+
+    # Volatilidad mínima MEDIA para E3
+    if bb.volatility_level == "BAJA":
+        print(f"   E3 descartado: volatilidad baja en apertura ({bb.bandwidth_pct_15m:.0f}%)")
+        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+
+    second = f"\nProb. segundo salto mañana: {int(gap['second_prob'] * 100)}%" \
+             if gap["second_prob"] >= 0.5 else ""
 
     if gap["direction"] == "up":
-        # FIX 3: Solo CALL si MAs 1H confirman (alcistas)
-        if ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
-            exp = (
-                "ESTRATEGIA 3 -- SALTO ALCISTA en apertura.\n"
-                f"Gap alcista: +${gap['size']} (+{gap['pct']}%) vs cierre anterior.\n\n"
-                f"MAs 1H: {ma.trend_1h} -- CONFIRMAN direccion alcista (DECISION)\n"
-                f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% (ENTRADA){second}\n"
-                f"Diario: {ma.daily_trend} (contexto)\n"
-                f"Score: {score}/100\n\n"
-                "Del libro: 90% de probabilidad de continuacion en direccion del salto."
-            )
-            return StrategyType.SALTO_ALCISTA, SignalDirection.CALL, strength, exp
-        else:
-            print(f"  Gap alcista pero MAs {ma.trend_1h} no confirman -- descartado")
-            return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+        exp = (
+            "E3 — SALTO ALCISTA en apertura.\n\n"
+            f"Gap alcista: +${gap['size']} (+{gap['pct']:.2f}%) vs cierre anterior\n\n"
+            f"MAs 1H: {ma.trend_1h} — CONFIRMAN dirección alcista (DECISIÓN)\n"
+            f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% — {bb.volatility_level} (ENTRADA)\n"
+            f"Vela 15min: {bb.candle_type} ({bb.candle_body_pct:.0f}% cuerpo)\n"
+            f"Diario: {ma.daily_trend} (CONTEXTO)\n"
+            f"Score: {score}/100{second}\n\n"
+            "Del libro: 90% de probabilidad de continuación alcista.\n"
+            "Los saltos ocurren entre cierre y apertura — solo los grandes\n"
+            "fondos operan en ese periodo. El gap indica su dirección."
+        )
+        return StrategyType.E3_SALTO_ALCISTA, SignalDirection.CALL, strength, exp
 
-    elif gap["direction"] == "down":
-        # FIX 3: Solo PUT si MAs 1H confirman (bajistas)
-        if ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
-            exp = (
-                "ESTRATEGIA 3 -- SALTO BAJISTA en apertura.\n"
-                f"Gap bajista: -${gap['size']} (-{gap['pct']}%) vs cierre anterior.\n\n"
-                f"MAs 1H: {ma.trend_1h} -- CONFIRMAN direccion bajista (DECISION)\n"
-                f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% (ENTRADA){second}\n"
-                f"Diario: {ma.daily_trend} (contexto)\n"
-                f"Score: {score}/100\n\n"
-                "Del libro: 90% de probabilidad de continuacion bajista."
-            )
-            return StrategyType.SALTO_BAJISTA, SignalDirection.PUT, strength, exp
-        else:
-            print(f"  Gap bajista pero MAs {ma.trend_1h} no confirman -- descartado")
-            return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-    return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+    else:  # gap down
+        exp = (
+            "E3 — SALTO BAJISTA en apertura.\n\n"
+            f"Gap bajista: -${gap['size']} (-{gap['pct']:.2f}%) vs cierre anterior\n\n"
+            f"MAs 1H: {ma.trend_1h} — CONFIRMAN dirección bajista (DECISIÓN)\n"
+            f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% — {bb.volatility_level} (ENTRADA)\n"
+            f"Vela 15min: {bb.candle_type} ({bb.candle_body_pct:.0f}% cuerpo)\n"
+            f"Diario: {ma.daily_trend} (CONTEXTO)\n"
+            f"Score: {score}/100{second}\n\n"
+            "Del libro: 90% de probabilidad de continuación bajista.\n"
+            "Los saltos ocurren entre cierre y apertura — solo los grandes\n"
+            "fondos operan en ese periodo. El gap indica su dirección."
+        )
+        return StrategyType.E3_SALTO_BAJISTA, SignalDirection.PUT, strength, exp
 
 
-def _strategy_canal(ma, bb, score):
+def _strategy_canal(ma: MADecision, bb: BBDecision,
+                    score: float, strength: SignalStrength):
+    """
+    Estrategia 1 y 2 del libro — Canal Lateral.
+
+    Requisitos EXACTOS del libro:
+    1. Las 4 MAs (20,40,100,200) en 1H entrelazadas >= 10 días
+    2. Precio SALIÓ del canal (no cerca, SALIÓ)
+    3. BB 15min con volatilidad ALTA (percentil > 75 + expandiendo)
+    4. Vela de confirmación extrema (cuerpo > 70%)
+    5. Confirmación también en BB 1H (double check)
+    """
+
+    # Requisito de volatilidad ALTA para E1/E2 (más estricto)
+    if bb.volatility_level != "ALTA":
+        print(f"   E1/E2: volatilidad {bb.volatility_level} — se requiere ALTA (>75%)")
+        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
+
     days = ma.lateral_days_1h
-    strength = score_to_strength(score)
 
-    if bb.is_high_volatility_15m and bb.price_above_upper_15m:
-        candle_txt = "Vela extremadamente alcista en 15min -- confirmacion del libro.\n" if bb.candle_type == "extreme_bullish" else ""
+    # ── E1: Ruptura al ALZA ──
+    if bb.price_above_upper:
+
+        candle_txt = ""
+        if bb.candle_body_pct > 70:
+            candle_txt = f"✅ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
+        else:
+            # Sin vela extrema = señal más débil, bajar a MODERADO
+            if strength == SignalStrength.FUERTE:
+                strength = SignalStrength.MODERADO
+            candle_txt = f"⚠️ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
+
+        confirm_1h = "✅ BB 1H también expandiendo" if bb.bb_expanding_1h else "⚠️ BB 1H no confirmado aún"
+
         exp = (
-            "ESTRATEGIA 1 -- CANAL LATERAL AL ALZA.\n\n"
-            f"MAs 1H: canal lateral {days} dias -- MAs entrelazadas (DECISION)\n"
-            "Precio rompio el canal al ALZA.\n"
+            "E1 — CANAL LATERAL AL ALZA.\n\n"
+            f"MAs 1H: canal lateral {days} días — 4 MAs entrelazadas (DECISIÓN)\n"
+            f"Precio ROMPIÓ el canal al ALZA\n"
             f"{candle_txt}"
-            f"BB 15min: alta volatilidad {bb.bandwidth_pct_15m:.0f}% percentil -- CONFIRMADA\n"
-            f"Diario: {ma.daily_trend} (contexto)\n"
+            f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% — ALTA volatilidad (ENTRADA)\n"
+            f"{confirm_1h}\n"
+            f"Diario: {ma.daily_trend} (CONTEXTO)\n"
             f"Score: {score}/100\n\n"
-            "Rentabilidades historicas del libro: 100% a 3000% en 2-5 dias."
+            "Del libro: rentabilidades históricas 100% a 3000% en 2-5 días.\n"
+            "Requisitos cumplidos: canal >= 10 días + ruptura + BB alta volatilidad.\n"
+            "Confirmar en TC2000 antes de entrar."
         )
-        return StrategyType.CANAL_LATERAL_ALZA, SignalDirection.CALL, strength, exp
+        return StrategyType.E1_CANAL_ALZA, SignalDirection.CALL, strength, exp
 
-    elif bb.is_high_volatility_15m and bb.price_below_lower_15m:
-        candle_txt = "Vela extremadamente bajista en 15min -- confirmacion del libro.\n" if bb.candle_type == "extreme_bearish" else ""
+    # ── E2: Ruptura a la BAJA ──
+    elif bb.price_below_lower:
+
+        candle_txt = ""
+        if bb.candle_body_pct > 70:
+            candle_txt = f"✅ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
+        else:
+            if strength == SignalStrength.FUERTE:
+                strength = SignalStrength.MODERADO
+            candle_txt = f"⚠️ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
+
+        confirm_1h = "✅ BB 1H también expandiendo" if bb.bb_expanding_1h else "⚠️ BB 1H no confirmado aún"
+
         exp = (
-            "ESTRATEGIA 2 -- CANAL LATERAL A LA BAJA.\n\n"
-            f"MAs 1H: canal lateral {days} dias -- MAs entrelazadas (DECISION)\n"
-            "Precio rompio el canal a la BAJA.\n"
+            "E2 — CANAL LATERAL A LA BAJA.\n\n"
+            f"MAs 1H: canal lateral {days} días — 4 MAs entrelazadas (DECISIÓN)\n"
+            f"Precio ROMPIÓ el canal a la BAJA\n"
             f"{candle_txt}"
-            f"BB 15min: alta volatilidad {bb.bandwidth_pct_15m:.0f}% percentil -- CONFIRMADA\n"
-            f"Diario: {ma.daily_trend} (contexto)\n"
+            f"BB 15min: percentil {bb.bandwidth_pct_15m:.0f}% — ALTA volatilidad (ENTRADA)\n"
+            f"{confirm_1h}\n"
+            f"Diario: {ma.daily_trend} (CONTEXTO)\n"
             f"Score: {score}/100\n\n"
-            "Rentabilidades historicas del libro: 100% a 3000% en 2-5 dias."
+            "Del libro: rentabilidades históricas 100% a 3000% en 2-5 días.\n"
+            "Requisitos cumplidos: canal >= 10 días + ruptura + BB alta volatilidad.\n"
+            "Confirmar en TC2000 antes de entrar."
         )
-        return StrategyType.CANAL_LATERAL_BAJA, SignalDirection.PUT, strength, exp
-
-    elif bb.is_squeeze_15m:
-        exp = (
-            f"SQUEEZE en canal lateral de {days} dias.\n"
-            f"MAs 1H: {days} dias entrelazadas (DECISION)\n"
-            "BB 15min: squeeze -- explosion inminente\n"
-            f"Score: {score}/100\n"
-            "Esperar BB expandiendo con alta volatilidad -- puede ser E1 o E2."
-        )
-        return StrategyType.SQUEEZE, SignalDirection.NEUTRAL, SignalStrength.MODERADO, exp
-
-    return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-
-def _strategy_bb_salida(ma, bb, score, pan_dir):
-    if not bb.is_high_volatility_15m:
-        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-    strength = score_to_strength(score)
-    sr_txt = f"Rebotando en {ma.bouncing_on} como {'PISO' if ma.bounce_dir == 'up' else 'TECHO'}.\n" if ma.bouncing_on else ""
-    sup_txt = f"Soporte: {ma.nearest_support} | Resistencia: {ma.nearest_resistance}\n" if ma.nearest_support or ma.nearest_resistance else ""
-
-    if bb.price_above_upper_15m:
-        if ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
-            exp = (
-                "BB SALIDA BANDA SUPERIOR -- Sobreextension alcista -> PUT.\n\n"
-                f"BB 15min: precio SALIO de banda superior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-                f"MAs 1H: {ma.trend_1h} -- bajista (DECISION)\n"
-                f"{sr_txt}{sup_txt}Diario: {ma.daily_trend}\nScore: {score}/100"
-            )
-            return StrategyType.BB_SALIDA_PUT, SignalDirection.PUT, strength, exp
-        elif ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
-            exp = (
-                "BB SALIDA BANDA SUPERIOR -- Ruptura alcista -> CALL.\n\n"
-                f"BB 15min: precio SALIO de banda superior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-                f"MAs 1H: {ma.trend_1h} -- alcista (DECISION)\n"
-                f"{sr_txt}{sup_txt}Diario: {ma.daily_trend}\nScore: {score}/100"
-            )
-            return StrategyType.BB_SALIDA_CALL, SignalDirection.CALL, strength, exp
-
-    elif bb.price_below_lower_15m:
-        if ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
-            exp = (
-                "BB SALIDA BANDA INFERIOR -- Sobreextension bajista -> CALL.\n\n"
-                f"BB 15min: precio SALIO de banda inferior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-                f"MAs 1H: {ma.trend_1h} -- alcista (DECISION)\n"
-                f"{sr_txt}{sup_txt}Diario: {ma.daily_trend}\nScore: {score}/100"
-            )
-            return StrategyType.BB_SALIDA_CALL, SignalDirection.CALL, strength, exp
-        elif ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
-            exp = (
-                "BB SALIDA BANDA INFERIOR -- Ruptura bajista -> PUT.\n\n"
-                f"BB 15min: precio SALIO de banda inferior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-                f"MAs 1H: {ma.trend_1h} -- bajista (DECISION)\n"
-                f"{sr_txt}{sup_txt}Diario: {ma.daily_trend}\nScore: {score}/100"
-            )
-            return StrategyType.BB_SALIDA_PUT, SignalDirection.PUT, strength, exp
-
-    return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-
-def _strategy_bb_acercamiento(ma, bb, score, pan_dir):
-    if not bb.is_expanding_15m or bb.bandwidth_pct_15m < 55:
-        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-    if score < 50:
-        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-    sr_txt = f"Rebotando en {ma.bouncing_on}.\n" if ma.bouncing_on else ""
-
-    if bb.price_near_upper_15m and ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
-        exp = (
-            "BB ACERCAMIENTO BANDA SUPERIOR -- Anticipando PUT.\n\n"
-            f"BB 15min: acercandose a banda superior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-            f"MAs 1H: {ma.trend_1h} -- bajista (DECISION)\n"
-            f"{sr_txt}Diario: {ma.daily_trend}\nScore: {score}/100\n"
-            "Posible PUT si el precio sale de la banda."
-        )
-        return StrategyType.BB_ACERCAMIENTO_PUT, SignalDirection.PUT, SignalStrength.MODERADO, exp
-
-    elif bb.price_near_lower_15m and ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
-        exp = (
-            "BB ACERCAMIENTO BANDA INFERIOR -- Anticipando CALL.\n\n"
-            f"BB 15min: acercandose a banda inferior -- percentil {bb.bandwidth_pct_15m:.0f}%\n"
-            f"MAs 1H: {ma.trend_1h} -- alcista (DECISION)\n"
-            f"{sr_txt}Diario: {ma.daily_trend}\nScore: {score}/100\n"
-            "Posible CALL si el precio sale de la banda."
-        )
-        return StrategyType.BB_ACERCAMIENTO_CALL, SignalDirection.CALL, SignalStrength.MODERADO, exp
-
-    return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-
-def _strategy_rebote(ma, bb, score):
-    if not bb.is_high_volatility_15m:
-        return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
-
-    strength = score_to_strength(score)
-
-    if ma.bounce_dir == "up" and ma.trend_1h in ["alcista_fuerte", "alcista_parcial"]:
-        exp = (
-            f"REBOTE EN {ma.bouncing_on} COMO PISO -> CALL.\n\n"
-            f"MAs 1H: {ma.bouncing_on} como PISO -- {ma.trend_1h} (DECISION)\n"
-            f"BB 15min: alta volatilidad {bb.bandwidth_pct_15m:.0f}% (ENTRADA)\n"
-            f"Diario: {ma.daily_trend} | Score: {score}/100\n"
-            "Del libro: las MAs actuan como pisos en tendencia alcista."
-        )
-        return StrategyType.REBOTE_MA_CALL, SignalDirection.CALL, strength, exp
-
-    elif ma.bounce_dir == "down" and ma.trend_1h in ["bajista_fuerte", "bajista_parcial"]:
-        exp = (
-            f"REBOTE EN {ma.bouncing_on} COMO TECHO -> PUT.\n\n"
-            f"MAs 1H: {ma.bouncing_on} como TECHO -- {ma.trend_1h} (DECISION)\n"
-            f"BB 15min: alta volatilidad {bb.bandwidth_pct_15m:.0f}% (ENTRADA)\n"
-            f"Diario: {ma.daily_trend} | Score: {score}/100\n"
-            "Del libro: las MAs actuan como techos en tendencia bajista."
-        )
-        return StrategyType.REBOTE_MA_PUT, SignalDirection.PUT, strength, exp
+        return StrategyType.E2_CANAL_BAJA, SignalDirection.PUT, strength, exp
 
     return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
 
 
 # ============================================================
-# RECOMENDACION
+# RECOMENDACIÓN FINAL
 # ============================================================
 
-def generate_rec(direction, strength, events, ma, chop):
-    high_today = any(e["impact"] == "alto" and e["days"] == 0 for e in events)
+def generate_rec(direction: SignalDirection, strength: SignalStrength,
+                 strategy: StrategyType, events: list,
+                 ma: MADecision, bb: BBDecision, chop: float,
+                 earnings: dict = None, agotamiento: dict = None) -> str:
+
     if chop > 61.8:
-        return "NO OPERAR -- Mercado choppy sin direccion clara."
+        return "NO OPERAR — Mercado choppy sin dirección clara. Esperar."
+
+    # Earnings HOY = no entrar, punto
+    if earnings and earnings.get("has_earnings") and earnings.get("days_away") == 0:
+        return (
+            f"🚨 NO ENTRAR — EARNINGS HOY ({earnings['date']}).\n"
+            "El IV Crush al cierre destruye el valor de la opción.\n"
+            "Esperar al día siguiente del reporte para evaluar E3 (salto)."
+        )
+
+    high_today = any(e["impact"] == "alto" and e["days"] == 0 for e in events)
+
+    if strategy == StrategyType.SQUEEZE_CANAL:
+        return (
+            "MONITOREAR — Squeeze en canal lateral.\n"
+            "Esperar BB expandiendo + precio saliendo del canal + vela extrema.\n"
+            "No entrar hasta confirmar dirección (puede ser E1 o E2)."
+        )
+
     if strength == SignalStrength.DEBIL:
-        return "No entrar -- senal debil. Esperar condiciones mejores."
+        return "No entrar — señal débil. Esperar mejores condiciones."
+
     if high_today:
-        return f"{direction.value} {strength.value} -- Evento de alto impacto HOY. Esperar o reducir tamano."
-    if direction == SignalDirection.NEUTRAL:
-        return "MONITOREAR -- Esperar confirmacion de direccion."
-    blind = f"\n{ma.daily_warning}" if ma.daily_warning else ""
+        return (
+            f"{direction.value} {strength.value} — ⚠️ Evento de alto impacto HOY.\n"
+            "Reducir tamaño de posición o esperar después del evento."
+        )
+
+    # Earnings próximos = reducir tamaño
+    earnings_txt = ""
+    if earnings and earnings.get("has_earnings"):
+        days = earnings["days_away"]
+        if days == 1:
+            earnings_txt = f"\n⚠️ EARNINGS MAÑANA — Reducir tamaño al mínimo."
+        elif days <= 3:
+            earnings_txt = f"\n📅 Earnings en {days} días — IV elevada, tamaño reducido."
+
+    # Agotamiento = agregar nota de salida
+    agot_txt = ""
+    if agotamiento and agotamiento.get("has_agotamiento"):
+        agot_txt = (
+            f"\n⚠️ Señales de agotamiento detectadas — "
+            "proteger posición si ya estás adentro."
+        )
+
+    blind   = f"\n{ma.daily_warning}" if ma.daily_warning else ""
+    vol_txt = f"Volatilidad BB: {bb.bandwidth_pct_15m:.0f}% percentil — {bb.volatility_level}"
+
     if strength == SignalStrength.FUERTE:
-        return f"{direction.value} FUERTE -- Panorama completo alineado. Confirmar en TC2000.{blind}"
+        return (
+            f"{direction.value} FUERTE — Todos los elementos alineados.\n"
+            f"{vol_txt}\n"
+            f"Confirmar en TC2000 antes de entrar."
+            f"{earnings_txt}{agot_txt}{blind}"
+        )
     else:
-        return f"{direction.value} MODERADO -- Mayoria alineada. Confirmar visualmente antes de entrar.{blind}"
+        return (
+            f"{direction.value} MODERADO — Mayoría alineada.\n"
+            f"{vol_txt}\n"
+            f"Confirmar visualmente en TC2000 antes de entrar."
+            f"{earnings_txt}{agot_txt}{blind}"
+        )
+
+
+# ============================================================
+# CATEGORIA DEL TICKER
+# ============================================================
+
+def get_categoria(ticker: str) -> str:
+    for cat, tickers in TICKERS_SAAI.items():
+        if ticker in tickers:
+            return cat.replace("_", " ")
+    return "OTRO"
 
 
 # ============================================================
 # MOTOR PRINCIPAL
 # ============================================================
 
-def fetch_data(ticker):
+def fetch_data(ticker: str):
     stock = yf.Ticker(ticker)
     return (
         stock.history(period="5d",  interval="15m"),
         stock.history(period="3mo", interval="1h"),
-        stock.history(period="1y",  interval="1d")
+        stock.history(period="1y",  interval="1d"),
     )
 
 
-def analyze_ticker(ticker):
+def analyze_ticker(ticker: str) -> Optional[Alert]:
     try:
         df_15m, df_1h, df_daily = fetch_data(ticker)
+
         if df_15m.empty or df_1h.empty or df_daily.empty:
             print(f"[{ticker}] Sin datos")
             return None
@@ -814,63 +1120,89 @@ def analyze_ticker(ticker):
         bb   = analyze_bb(df_15m, df_1h)
         gap  = analyze_gaps(df_daily, ma)
         chop = calc_choppiness(df_1h)
-        score, pan_dir = calc_score(ma, bb, gap, chop)
+
+        score, pan_dir = calc_score(ma, bb, chop)
+
+        print(
+            f"[{ticker}] Score:{score} | Chop:{chop} | "
+            f"Vol:{bb.volatility_level}({bb.bandwidth_pct_15m:.0f}%) | "
+            f"MAs:{ma.trend_1h} | Canal:{ma.lateral_days_1h}d"
+        )
 
         strategy, direction, strength, explanation = identify_strategy(
             ma, bb, gap, chop, score, pan_dir
         )
 
         if strength == SignalStrength.DEBIL or strategy == StrategyType.NONE:
-            print(f"[{ticker}] -- Sin senal (Score:{score} | Chop:{chop} | BB:{bb.bandwidth_pct_15m:.0f}% | MAs:{ma.trend_1h})")
             return None
 
+        # ── Eventos macro ──
         events = check_events()
-        rec = generate_rec(direction, strength, events, ma, chop)
 
+        # ── Earnings automáticos ──
+        earnings = check_earnings(ticker)
+        if earnings.get("has_earnings"):
+            print(f"   [{ticker}] {earnings['warning']}")
+
+        # ── Agotamiento de tendencia ──
+        agotamiento = check_agotamiento(df_15m, df_1h, ma, bb)
+        if agotamiento.get("has_agotamiento"):
+            print(f"   [{ticker}] Agotamiento detectado: {len(agotamiento['signals'])} señales")
+
+        # ── Recomendación ──
+        rec = generate_rec(direction, strength, strategy, events, ma, bb, chop,
+                           earnings, agotamiento)
+
+        # ── Advertencias consolidadas ──
         warns = [e["warning"] for e in events]
-        if ma.daily_warning: warns.append(ma.daily_warning)
-        if bb.bb_contracting_15m: warns.append("BB 15min contrayendose -- monitorear agotamiento")
+        if earnings.get("has_earnings"):
+            warns.append(earnings["warning"])
+        if agotamiento.get("has_agotamiento"):
+            warns.append(agotamiento["warning"])
+        if ma.daily_warning:
+            warns.append(ma.daily_warning)
 
-        et = pytz.timezone('US/Eastern')
+        et  = pytz.timezone('US/Eastern')
         now = datetime.now(et)
 
         return Alert(
             ticker=ticker,
             timestamp=now.strftime("%Y-%m-%d %I:%M %p ET"),
-            strategy=strategy, direction=direction, strength=strength,
-            ma=ma, bb=bb, score=score, price=ma.price,
-            explanation=explanation, recommendation=rec,
+            strategy=strategy,
+            direction=direction,
+            strength=strength,
+            ma=ma,
+            bb=bb,
+            score=score,
+            price=ma.price,
+            explanation=explanation,
+            recommendation=rec,
             warning="\n".join(warns) if warns else None,
-            external_events=events
+            external_events=events,
+            categoria=get_categoria(ticker),
+            earnings=earnings,
+            agotamiento=agotamiento,
         )
 
     except Exception as e:
         print(f"[{ticker}] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
-# ============================================================
-# TICKERS Y RUN
-# ============================================================
-
-DEFAULT_TICKERS = [
-    "SPY", "QQQ", "DIA", "IWM", "GLD", "TLT", "USO",
-    "^GSPC",
-    "AAPL", "TSLA", "NVDA", "MSFT", "META", "AMZN",
-    "AMD", "MU", "MRNA", "NIO", "LI"
-]
-
-
-def run_analysis(tickers=None):
+def run_analysis(tickers=None) -> list:
     if tickers is None:
-        env = os.environ.get("SAAI_TICKERS", "")
+        env     = os.environ.get("SAAI_TICKERS", "")
         tickers = [t.strip() for t in env.split(",")] if env else DEFAULT_TICKERS
 
     et = pytz.timezone('US/Eastern')
+
     print(f"\n{'=' * 65}")
-    print(f"  SAAI v4.2 -- Smart Alert AI System")
-    print(f"  Un Millon al Anno No Hace Danno -- Yoel Sardinas")
-    print(f"  FIXES: Score<50=no alerta | Saltos solo 9:30-10am | MAs confirman gaps")
+    print(f"  SAAI v5.1 — Smart Alert AI System")
+    print(f"  Un Millón al Año No Hace Daño — Yoel Sardiñas")
+    print(f"  Estrategias: E1 Canal Alza | E2 Canal Baja | E3 Saltos")
+    print(f"  Volatilidad: ALTA(>75%) | MEDIA(60-75%) | BAJA(<60%)")
     print(f"  {len(tickers)} tickers | {datetime.now(et).strftime('%I:%M %p ET')}")
     print(f"{'=' * 65}\n")
 
@@ -880,26 +1212,40 @@ def run_analysis(tickers=None):
         a = analyze_ticker(ticker)
         if a:
             alerts.append(a)
-            print(f"[{ticker}] ALERTA: {a.strategy.value} -> {a.direction.value} {a.strength.value} (Score:{a.score})")
+            print(
+                f"[{ticker}] ✅ ALERTA: {a.strategy.value} → "
+                f"{a.direction.value} {a.strength.value} "
+                f"(Score:{a.score} | Vol:{a.bb.volatility_level})"
+            )
 
     print(f"\n{'=' * 65}")
     print(f"  Analizados: {len(tickers)} | Alertas: {len(alerts)}")
-    print(f"  Si algun elemento no se presenta, se convierte en una apuesta.")
+    if alerts:
+        for a in alerts:
+            print(f"  → {a.ticker} [{a.categoria}]: {a.strategy.value}")
+    print(f"\n  REGLA: Si algún elemento no se presenta, se convierte en apuesta.")
     print(f"{'=' * 65}\n")
 
     return alerts
 
 
+# ============================================================
+# RUN DIRECTO
+# ============================================================
+
 if __name__ == "__main__":
     alerts = run_analysis()
     for a in alerts:
-        print(f"\n{'-' * 55}")
-        print(f"{a.ticker} -- {a.timestamp} -- ${a.price}")
+        print(f"\n{'-' * 60}")
+        print(f"{a.ticker} [{a.categoria}] — {a.timestamp} — ${a.price}")
         print(f"{a.strategy.value}")
         print(f"{a.direction.value} {a.strength.value} | Score: {a.score}/100")
-        print(f"MAs 1H: {a.ma.trend_1h} | BB: {a.bb.bandwidth_pct_15m:.0f}% | Diario: {a.ma.daily_trend}")
-        if a.ma.daily_warning: print(f"\n{a.ma.daily_warning}")
+        print(f"MAs 1H: {a.ma.trend_1h} | BB Vol: {a.bb.volatility_level} "
+              f"({a.bb.bandwidth_pct_15m:.0f}%) | Diario: {a.ma.daily_trend}")
+        if a.ma.daily_warning:
+            print(f"\n{a.ma.daily_warning}")
         print(f"\n{a.explanation}")
-        if a.warning: print(f"\n{a.warning}")
+        if a.warning:
+            print(f"\n{a.warning}")
         print(f"\n{a.recommendation}")
-        print(f"{'-' * 55}")
+        print(f"{'-' * 60}")
