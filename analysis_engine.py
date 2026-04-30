@@ -1,5 +1,5 @@
 """
-SAAI v5.1 - Smart Alert AI System
+SAAI v5.2 - Smart Alert AI System
 Motor de Análisis — FIEL AL LIBRO
 
 Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
@@ -682,9 +682,9 @@ def _calc_rsi(df: pd.DataFrame, period: int = 14) -> tuple:
         rs  = avg_g / avg_l
         rsi = round(100 - (100 / (1 + rs)), 1)
 
-        if rsi >= 70:
+        if rsi >= 75:
             signal = "SOBRECOMPRADO"
-        elif rsi <= 30:
+        elif rsi <= 25:
             signal = "SOBREVENDIDO"
         else:
             signal = "OK"
@@ -791,15 +791,14 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float,
       BB 15min (volatilidad real) → 40 pts  (CONFIRMACIÓN DE ENTRADA)
       MAs 1H   (tendencia)        → 45 pts  (DECISIÓN)
       Diario   (contexto)         → 15 pts  (CONTEXTO)
-      Volumen  (confirmación)     → bonus/penalización
 
-    Penalizaciones:
-      Choppy > 61.8               → score * 0.4
-      RSI sobrecomprado + CALL    → score * 0.5  (no entrar en techo)
-      RSI sobrevendido  + PUT     → score * 0.5  (no entrar en piso)
-      Sobreextensión BB           → score * 0.5  (reversión probable)
-      Volumen < 0.7x promedio     → score * 0.8  (sin convicción)
-      Diario contradice 1H        → score máximo 65
+    AJUSTES v5.2 (basados en backtesting):
+      RSI umbral subido 70→75    (AMD RSI76 subió +2.73%, umbral era muy estricto)
+      Bonus apertura +5pts       (9:30-10:00 ET = mayor movimiento confirmado)
+      Bonus momentum fuerte +5   (tendencia fuerte + diario alineado = más confianza)
+      Volumen alto bonus +5      (volumen > 1.5x = convicción real)
+      Penalización choppy suavizada 0.4→0.5 (no eliminar score tan agresivo)
+      Diario contradice límite 65→70 (mercado en transición, no castigar tanto)
     """
     score   = 0.0
     bullish = 0
@@ -855,37 +854,61 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float,
         "mixto"
     )
 
+    # ══ BONUS ══
+
+    # AJUSTE 1: Bonus apertura — backtesting confirmó 0.69% movimiento prom en 9:30-10:00
+    et  = __import__('pytz').timezone('US/Eastern')
+    now = __import__('datetime').datetime.now(et)
+    if now.hour == 9 and now.minute >= 30:
+        score = min(score + 5, 95)
+        print(f"   ✅ Bonus apertura (+5pts) — ventana 9:30-10:00am")
+
+    # AJUSTE 2: Bonus momentum fuerte — tendencia 1H Y diario alineados
+    if ma.trend_1h == "alcista_fuerte" and ma.daily_trend in ["alcista_fuerte","alcista_parcial"]:
+        score = min(score + 5, 95)
+        bullish += 1
+        print(f"   ✅ Bonus momentum alcista fuerte (+5pts)")
+    elif ma.trend_1h == "bajista_fuerte" and ma.daily_trend in ["bajista_fuerte","bajista_parcial"]:
+        score = min(score + 5, 95)
+        bearish += 1
+        print(f"   ✅ Bonus momentum bajista fuerte (+5pts)")
+
+    # AJUSTE 3: Bonus volumen alto — convicción real
+    if volume_ratio >= 1.5:
+        score = min(score + 5, 95)
+        print(f"   ✅ Bonus volumen alto ({volume_ratio:.1f}x promedio) (+5pts)")
+
     # ══ PENALIZACIONES ══
 
-    # 1. Choppy
+    # 1. Choppy — AJUSTE 4: suavizado de 0.4 a 0.5 (no eliminar señal tan agresivo)
     if chop > 61.8:
-        score *= 0.4
+        score *= 0.5
+        print(f"   ⚠️ Mercado choppy ({chop}) — score reducido 50%")
         return round(score, 1), direction
 
-    # 2. Sobreextensión BB — precio demasiado lejos de la media
-    #    Esto es lo que causó el falso CALL que viste
+    # 2. Sobreextensión BB
     if bb.overextended:
-        print(f"   ⚠️ Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda) — penalizando score")
+        print(f"   ⚠️ Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda)")
         score *= 0.5
 
-    # 3. RSI conflicto con dirección
-    #    CALL cuando RSI sobrecomprado = comprar en el techo = error clásico
-    #    PUT cuando RSI sobrevendido   = vender en el piso   = error clásico
-    if bb.rsi_signal == "SOBRECOMPRADO" and direction == "alcista":
-        print(f"   ⚠️ RSI {bb.rsi_15m} sobrecomprado en señal alcista — penalizando score")
+    # 3. RSI conflicto — AJUSTE 5: umbral subido de 70 a 75
+    #    (AMD RSI 76 subió +2.73% — umbral 70 era demasiado estricto)
+    if bb.rsi_15m > 75 and direction == "alcista":
+        print(f"   ⚠️ RSI {bb.rsi_15m} extremo (>75) en señal alcista — penalizando")
         score *= 0.5
-    elif bb.rsi_signal == "SOBREVENDIDO" and direction == "bajista":
-        print(f"   ⚠️ RSI {bb.rsi_15m} sobrevendido en señal bajista — penalizando score")
+    elif bb.rsi_15m < 25 and direction == "bajista":
+        print(f"   ⚠️ RSI {bb.rsi_15m} extremo (<25) en señal bajista — penalizando")
         score *= 0.5
 
-    # 4. Diario contradice 1H — limitar score máximo
+    # 4. Diario contradice 1H — AJUSTE 6: límite subido de 65 a 70
+    #    (mercado en transición — no penalizar tan fuerte)
     daily_bullish = ma.daily_trend in ["alcista_fuerte", "alcista_parcial"]
     daily_bearish = ma.daily_trend in ["bajista_fuerte", "bajista_parcial"]
     if (direction == "alcista" and daily_bearish) or \
        (direction == "bajista" and daily_bullish):
-        if score > 65:
-            print(f"   ⚠️ Diario contradice 1H — limitando score a 65")
-            score = 65
+        if score > 70:
+            print(f"   ⚠️ Diario contradice 1H — limitando score a 70")
+            score = 70
 
     # 5. Volumen bajo — sin convicción
     if volume_ratio < 0.7:
@@ -1311,7 +1334,7 @@ def run_analysis(tickers=None) -> list:
     et = pytz.timezone('US/Eastern')
 
     print(f"\n{'=' * 65}")
-    print(f"  SAAI v5.1 — Smart Alert AI System")
+    print(f"  SAAI v5.2 — Smart Alert AI System")
     print(f"  Un Millón al Año No Hace Daño — Yoel Sardiñas")
     print(f"  Estrategias: E1 Canal Alza | E2 Canal Baja | E3 Saltos")
     print(f"  Volatilidad: ALTA(>75%) | MEDIA(60-75%) | BAJA(<60%)")
