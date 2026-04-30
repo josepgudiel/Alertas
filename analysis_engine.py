@@ -782,62 +782,64 @@ def analyze_gaps(df_daily: pd.DataFrame, ma: MADecision) -> dict:
 # SCORING — FIEL AL LIBRO
 # ============================================================
 
-def calc_score(ma: MADecision, bb: BBDecision, chop: float,
-               volume_ratio: float = 1.0) -> tuple:
+def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     """
     Score 0-100. Mínimo 55 para alertar.
 
-    Pesos:
-      BB 15min (volatilidad real) → 40 pts  (CONFIRMACIÓN DE ENTRADA)
-      MAs 1H   (tendencia)        → 45 pts  (DECISIÓN)
-      Diario   (contexto)         → 15 pts  (CONTEXTO)
+    Pesos (fiel al libro):
+      BB 15min (entrada + decisión) → 55 pts  ← lo más importante
+      BB 1H    (confirmación)       → +5 pts bonus si expandiendo
+      MAs 1H   (tendencia)          → 30 pts
+      Diario   (puntos ciegos)      → 15 pts
+      ─────────────────────────────────────
+      Total posible: 105 pts (cap 95)
 
-    AJUSTES v5.2 (basados en backtesting):
-      RSI umbral subido 70→75    (AMD RSI76 subió +2.73%, umbral era muy estricto)
-      Bonus apertura +5pts       (9:30-10:00 ET = mayor movimiento confirmado)
-      Bonus momentum fuerte +5   (tendencia fuerte + diario alineado = más confianza)
-      Volumen alto bonus +5      (volumen > 1.5x = convicción real)
-      Penalización choppy suavizada 0.4→0.5 (no eliminar score tan agresivo)
-      Diario contradice límite 65→70 (mercado en transición, no castigar tanto)
+    Nota: Volumen eliminado — en opciones no es factor de decisión relevante.
     """
     score   = 0.0
     bullish = 0
     bearish = 0
 
-    # ── BB 15min — hasta 40 pts ──
+    # ── BB 15min — hasta 55 pts (ENTRADA + DECISIÓN) ──
+    # Es la señal más importante del libro — dice CUÁNDO y HACIA DÓNDE
     if bb.volatility_level == "ALTA":
-        score += 30
+        score += 40                         # volatilidad real confirmada
         if bb.price_above_upper:
-            score += 10; bearish += 2
+            score += 10; bearish += 2       # salió banda superior → PUT
         elif bb.price_below_lower:
-            score += 10; bullish += 2
+            score += 10; bullish += 2       # salió banda inferior → CALL
         elif bb.candle_body_pct > 70:
-            score += 7
+            score += 5                      # vela extrema = confirmación libro
     elif bb.volatility_level == "MEDIA":
-        score += 18
+        score += 25
         if bb.price_above_upper or bb.price_below_lower:
             score += 5
     elif bb.is_squeeze_15m:
-        score += 8
+        score += 10                         # squeeze = explosión inminente
 
-    # ── MAs 1H — hasta 45 pts ──
+    # BB 1H — confirmación adicional (+5 si también expandiendo)
+    if bb.bb_expanding_1h:
+        score = min(score + 5, 95)
+        bullish += 1 if score > 0 else 0
+
+    # ── MAs 1H — hasta 30 pts (TENDENCIA — contexto de dirección) ──
     if ma.trend_1h == "alcista_fuerte":
-        score += 45; bullish += 3
+        score += 30; bullish += 3
     elif ma.trend_1h == "alcista_parcial":
-        score += 30; bullish += 2
+        score += 20; bullish += 2
     elif ma.trend_1h == "bajista_fuerte":
-        score += 45; bearish += 3
+        score += 30; bearish += 3
     elif ma.trend_1h == "bajista_parcial":
-        score += 30; bearish += 2
+        score += 20; bearish += 2
     elif ma.is_lateral_1h:
-        score += 18
+        score += 12
 
     if ma.price_above_all:
-        score = min(score + 5, 95); bullish += 1
+        score = min(score + 3, 95); bullish += 1
     elif ma.price_below_all:
-        score = min(score + 5, 95); bearish += 1
+        score = min(score + 3, 95); bearish += 1
 
-    # ── Diario — hasta 15 pts ──
+    # ── Diario — hasta 15 pts (PUNTOS CIEGOS) ──
     if ma.daily_trend == "alcista_fuerte":
         score += 15; bullish += 1
     elif ma.daily_trend == "alcista_parcial":
@@ -873,14 +875,9 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float,
         bearish += 1
         print(f"   ✅ Bonus momentum bajista fuerte (+5pts)")
 
-    # AJUSTE 3: Bonus volumen alto — convicción real
-    if volume_ratio >= 1.5:
-        score = min(score + 5, 95)
-        print(f"   ✅ Bonus volumen alto ({volume_ratio:.1f}x promedio) (+5pts)")
-
     # ══ PENALIZACIONES ══
 
-    # 1. Choppy — AJUSTE 4: suavizado de 0.4 a 0.5 (no eliminar señal tan agresivo)
+    # 1. Choppy — suavizado a 0.5 (no eliminar señal tan agresivo)
     if chop > 61.8:
         score *= 0.5
         print(f"   ⚠️ Mercado choppy ({chop}) — score reducido 50%")
@@ -927,11 +924,6 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float,
         if score > 70:
             print(f"   ⚠️ Diario contradice 1H — limitando score a 70")
             score = 70
-
-    # 5. Volumen bajo — sin convicción
-    if volume_ratio < 0.7:
-        print(f"   ⚠️ Volumen bajo ({volume_ratio:.1f}x promedio) — penalizando score")
-        score *= 0.8
 
     return round(score, 1), direction
 
@@ -1266,15 +1258,7 @@ def analyze_ticker(ticker: str) -> Optional[Alert]:
         gap  = analyze_gaps(df_daily, ma)
         chop = calc_choppiness(df_1h)
 
-        # ── Volumen: ratio vs promedio 20 barras en 15min ──
-        volume_ratio = 1.0
-        if 'Volume' in df_15m.columns and len(df_15m) >= 21:
-            vol_now = float(df_15m['Volume'].iloc[-1])
-            vol_avg = float(df_15m['Volume'].tail(21).iloc[:-1].mean())
-            volume_ratio = round(vol_now / vol_avg, 2) if vol_avg > 0 else 1.0
-            print(f"   Volumen: {volume_ratio:.1f}x promedio")
-
-        score, pan_dir = calc_score(ma, bb, chop, volume_ratio)
+        score, pan_dir = calc_score(ma, bb, chop)
 
         print(
             f"[{ticker}] Score:{score} | Chop:{chop} | "
