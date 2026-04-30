@@ -1,5 +1,5 @@
 """
-SAAI v5.0 — Punto de Entrada Principal
+SAAI v5.3 — Punto de Entrada Principal
 Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
 
 Estrategias: E1 Canal Alza | E2 Canal Baja | E3 Saltos (apertura)
@@ -69,7 +69,7 @@ def is_market_hours() -> bool:
 
 def main():
     print("\n" + "=" * 65)
-    print("  SAAI v5.0 — Smart Alert AI System")
+    print("  SAAI v5.3 — Smart Alert AI System")
     print("  Un Millón al Año No Hace Daño — Yoel Sardiñas")
     print("  E1: Canal Alza | E2: Canal Baja | E3: Saltos Apertura")
     print("=" * 65)
