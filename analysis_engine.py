@@ -12,7 +12,6 @@ from datetime import datetime
 from pathlib import Path
 import pytz
 
-from notifications import send_alert
 
 ALERT_LOG = Path("alert_history.json")
 
