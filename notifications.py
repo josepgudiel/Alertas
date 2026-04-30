@@ -333,7 +333,7 @@ def format_email_html(alert: Alert) -> str:
 
   <!-- FOOTER -->
   <div style="padding:20px 24px;font-size:10px;color:#aaa;text-align:center;line-height:2.0;">
-    SAAI v5.1 — Smart Alert AI System<br>
+    SAAI v5.3 — Smart Alert AI System<br>
     "Un Millón al Año No Hace Daño" — Yoel Sardiñas<br><br>
     📊 MAs 1H → Decisión &nbsp;|&nbsp; 📈 BB 15min → Entrada &nbsp;|&nbsp; 📅 Diario → Contexto<br><br>
     ⚠️ Herramienta de análisis técnico. No garantiza resultados.<br>
