@@ -28,15 +28,15 @@ def format_email_html(alert: Alert) -> str:
     if alert.direction == SignalDirection.CALL:
         accent    = "#1a6b3c"
         bg_accent = "rgba(26,107,60,0.08)"
-        emoji_dir = "🟢"
+        emoji_dir = "CALL"
     elif alert.direction == SignalDirection.PUT:
         accent    = "#c8401a"
         bg_accent = "rgba(200,64,26,0.08)"
-        emoji_dir = "🔴"
+        emoji_dir = "PUT"
     else:
         accent    = "#b8860b"
         bg_accent = "rgba(184,134,11,0.08)"
-        emoji_dir = "⚡"
+        emoji_dir = "NEUTRAL"
 
     # Badge de estrategia
     strat_badges = {
@@ -45,7 +45,7 @@ def format_email_html(alert: Alert) -> str:
         StrategyType.E3_SALTO_ALCISTA:    ("E3", "#1a3a6b"),
         StrategyType.E3_SALTO_BAJISTA:    ("E3", "#1a3a6b"),
         StrategyType.E3_CAMBIO_TENDENCIA: ("E3", "#b8860b"),
-        StrategyType.SQUEEZE_CANAL:       ("⚡",  "#b8860b"),
+        StrategyType.SQUEEZE_CANAL:       ("NEUTRAL",  "#b8860b"),
     }
     badge_txt, badge_color = strat_badges.get(alert.strategy, ("?", "#888"))
 
@@ -65,29 +65,29 @@ def format_email_html(alert: Alert) -> str:
     vol_color  = vol_colors.get(alert.bb.volatility_level, "#666")
 
     if alert.bb.price_above_upper:
-        bb_status = f"🔥 Precio SALIÓ banda superior — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
+        bb_status = f"HOT Precio SALIÓ banda superior — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
     elif alert.bb.price_below_lower:
-        bb_status = f"🔥 Precio SALIÓ banda inferior — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
+        bb_status = f"HOT Precio SALIÓ banda inferior — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
     elif alert.bb.is_squeeze_15m:
-        bb_status = f"⚡ SQUEEZE — Explosión inminente"
+        bb_status = f"NEUTRAL SQUEEZE — Explosión inminente"
     elif alert.bb.is_expanding_15m:
-        bb_status = f"↗ Expandiendo — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
+        bb_status = f"UP Expandiendo — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
     else:
         bb_status = f"Normal — {alert.bb.bandwidth_pct_15m:.0f}% percentil"
 
     # Vela de confirmación
     candle_icons = {
-        "extreme_bullish": "🕯️ Vela ALCISTA EXTREMA",
-        "extreme_bearish": "🕯️ Vela BAJISTA EXTREMA",
-        "normal_bullish":  "🕯️ Vela Alcista Normal",
-        "normal_bearish":  "🕯️ Vela Bajista Normal",
-        "doji":            "🕯️ Doji",
+        "extreme_bullish": "[vela] Vela ALCISTA EXTREMA",
+        "extreme_bearish": "[vela] Vela BAJISTA EXTREMA",
+        "normal_bullish":  "[vela] Vela Alcista Normal",
+        "normal_bearish":  "[vela] Vela Bajista Normal",
+        "doji":            "[vela] Doji",
     }
     candle_txt  = candle_icons.get(alert.bb.candle_type, alert.bb.candle_type)
     candle_body = f" ({alert.bb.candle_body_pct:.0f}% cuerpo)"
 
     # Canal lateral
-    canal_txt = f"✅ {alert.ma.lateral_days_1h} días" if alert.ma.is_lateral_1h else "No detectado"
+    canal_txt = f"OK {alert.ma.lateral_days_1h} días" if alert.ma.is_lateral_1h else "No detectado"
 
     # Soporte / Resistencia
     sup_res = []
@@ -100,7 +100,7 @@ def format_email_html(alert: Alert) -> str:
     # Puntos ciegos diario
     blind_html = ""
     if alert.ma.daily_blind_spots:
-        items = "<br>".join([f'⚠️ {b}' for b in alert.ma.daily_blind_spots])
+        items = "<br>".join([f'WARN {b}' for b in alert.ma.daily_blind_spots])
         blind_html = f"""
         <tr style="border-bottom:1px solid #eee;">
           <td style="padding:8px 12px;color:#b8860b;font-size:13px;">Puntos Ciegos Diario</td>
@@ -117,42 +117,42 @@ def format_email_html(alert: Alert) -> str:
         ev_html = '<span style="color:#1a6b3c;">Sin eventos macro — señal limpia</span>'
 
     # Confirmación BB 1H
-    confirm_1h_txt = "✅ BB 1H expandiendo también" if alert.bb.bb_expanding_1h \
-                     else "⚠️ BB 1H pendiente de confirmar"
+    confirm_1h_txt = "OK BB 1H expandiendo también" if alert.bb.bb_expanding_1h \
+                     else "WARN BB 1H pendiente de confirmar"
 
     # RSI
     rsi = alert.bb.rsi_15m
     if alert.bb.rsi_signal == "SOBRECOMPRADO":
         rsi_color = "#c8401a"
-        rsi_txt   = f"🔴 {rsi} — SOBRECOMPRADO (>70) — cuidado con CALL"
+        rsi_txt   = f"PUT {rsi} — SOBRECOMPRADO (>70) — cuidado con CALL"
     elif alert.bb.rsi_signal == "SOBREVENDIDO":
         rsi_color = "#1a6b3c"
-        rsi_txt   = f"🟢 {rsi} — SOBREVENDIDO (<30) — cuidado con PUT"
+        rsi_txt   = f"CALL {rsi} — SOBREVENDIDO (<30) — cuidado con PUT"
     else:
         rsi_color = "#333"
-        rsi_txt   = f"✅ {rsi} — Zona neutral"
+        rsi_txt   = f"OK {rsi} — Zona neutral"
 
     # Sobreextensión
     if alert.bb.overextended:
         overext_txt = (
-            f"⚠️ SÍ — precio {alert.bb.overextension_pct:.0f}% más allá de la banda "
+            f"WARN SÍ — precio {alert.bb.overextension_pct:.0f}% más allá de la banda "
             f"— alta probabilidad de reversión"
         )
     else:
-        overext_txt = "✅ No — precio dentro de rango normal"
+        overext_txt = "OK No — precio dentro de rango normal"
 
     # Earnings
     if alert.earnings.get("has_earnings"):
         days = alert.earnings.get("days_away", 0)
         if days == 0:
             e_color = "#c8401a"
-            e_icon  = "🚨"
+            e_icon  = "ALERT"
         elif days == 1:
             e_color = "#b8860b"
-            e_icon  = "⚠️"
+            e_icon  = "WARN"
         else:
             e_color = "#666"
-            e_icon  = "📅"
+            e_icon  = "[D]"
         earnings_html = (
             f'<span style="color:{e_color};font-weight:700;">'
             f'{e_icon} {alert.earnings["warning"]}</span>'
@@ -169,7 +169,7 @@ def format_email_html(alert: Alert) -> str:
         agot_html = f"""
   <div style="background:#fff8f0;border-left:4px solid #b8860b;padding:16px 20px;margin-top:2px;">
     <div style="font-size:10px;letter-spacing:1.5px;color:#b8860b;margin-bottom:8px;
-                text-transform:uppercase;">⚠️ Señales de Agotamiento</div>
+                text-transform:uppercase;">WARN Señales de Agotamiento</div>
     <ul style="margin:0;padding-left:18px;font-size:13px;color:#555;line-height:1.9;">
       {signals_list}
     </ul>
@@ -233,7 +233,7 @@ def format_email_html(alert: Alert) -> str:
       <!-- MAs 1H — DECISIÓN -->
       <tr style="border-bottom:1px solid #eee;background:#f0f4ff;">
         <td style="padding:8px 12px;color:#1a3a6b;font-size:13px;font-weight:700;">
-          📊 MAs 1H (DECISIÓN)
+          [MAs] MAs 1H (DECISIÓN)
         </td>
         <td style="padding:8px 12px;font-size:13px;font-weight:700;color:#1a3a6b;">
           {trend_1h}
@@ -257,7 +257,7 @@ def format_email_html(alert: Alert) -> str:
       <!-- BB 15min — ENTRADA -->
       <tr style="border-bottom:1px solid #eee;background:#f0fff4;">
         <td style="padding:8px 12px;color:#1a6b3c;font-size:13px;font-weight:700;">
-          📈 BB 15min (ENTRADA)
+          [BB] BB 15min (ENTRADA)
         </td>
         <td style="padding:8px 12px;font-size:13px;font-weight:700;color:{vol_color};">
           {alert.bb.volatility_level} — {bb_status}
@@ -287,7 +287,7 @@ def format_email_html(alert: Alert) -> str:
       <!-- Diario — CONTEXTO -->
       <tr style="border-bottom:1px solid #eee;background:#fffdf0;">
         <td style="padding:8px 12px;color:#b8860b;font-size:13px;font-weight:700;">
-          📅 Diario (CONTEXTO)
+          [D] Diario (CONTEXTO)
         </td>
         <td style="padding:8px 12px;font-size:13px;color:#b8860b;">{trend_daily}</td>
       </tr>
@@ -335,8 +335,8 @@ def format_email_html(alert: Alert) -> str:
   <div style="padding:20px 24px;font-size:10px;color:#aaa;text-align:center;line-height:2.0;">
     SAAI v5.3 — Smart Alert AI System<br>
     "Un Millón al Año No Hace Daño" — Yoel Sardiñas<br><br>
-    📊 MAs 1H → Decisión &nbsp;|&nbsp; 📈 BB 15min → Entrada &nbsp;|&nbsp; 📅 Diario → Contexto<br><br>
-    ⚠️ Herramienta de análisis técnico. No garantiza resultados.<br>
+    [MAs] MAs 1H → Decisión &nbsp;|&nbsp; [BB] BB 15min → Entrada &nbsp;|&nbsp; [D] Diario → Contexto<br><br>
+    WARN Herramienta de análisis técnico. No garantiza resultados.<br>
     La decisión final siempre es del trader.<br>
     Confirmar en TC2000 antes de entrar.
   </div>
@@ -353,8 +353,8 @@ def format_email_html(alert: Alert) -> str:
 # ============================================================
 
 def format_sms_text(alert: Alert) -> str:
-    emoji = "🟢" if alert.direction == SignalDirection.CALL \
-            else "🔴" if alert.direction == SignalDirection.PUT else "⚡"
+    emoji = "CALL" if alert.direction == SignalDirection.CALL \
+            else "PUT" if alert.direction == SignalDirection.PUT else "NEUTRAL"
 
     txt = (
         f"{emoji} SAAI v5.0 — {alert.ticker} [{alert.categoria}]\n"
@@ -392,18 +392,18 @@ def send_email(alert: Alert) -> bool:
         email_to_raw   = os.environ.get("EMAIL_TO", "")
 
         if not all([gmail_user, gmail_password, email_to_raw]):
-            print("[Email] ⚠️ Variables de Gmail no configuradas")
+            print("[Email] WARN Variables de Gmail no configuradas")
             return False
 
         recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
         if not recipients:
-            print("[Email] ⚠️ No hay destinatarios configurados")
+            print("[Email] WARN No hay destinatarios configurados")
             return False
 
         msg = MIMEMultipart("alternative")
 
-        emoji = "🟢" if alert.direction == SignalDirection.CALL \
-                else "🔴" if alert.direction == SignalDirection.PUT else "⚡"
+        emoji = "CALL" if alert.direction == SignalDirection.CALL \
+                else "PUT" if alert.direction == SignalDirection.PUT else "NEUTRAL"
 
         msg["Subject"] = (
             f"{emoji} SAAI: {alert.ticker} [{alert.categoria}] — "
@@ -420,11 +420,11 @@ def send_email(alert: Alert) -> bool:
             server.login(gmail_user, gmail_password)
             server.sendmail(gmail_user, recipients, msg.as_string())
 
-        print(f"[Email] ✅ Enviado a: {', '.join(recipients)}")
+        print(f"[Email] OK Enviado a: {', '.join(recipients)}")
         return True
 
     except Exception as e:
-        print(f"[Email] ❌ Error: {e}")
+        print(f"[Email] ERROR Error: {e}")
         return False
 
 
@@ -452,12 +452,12 @@ def send_sms(alert: Alert) -> bool:
             from_=from_number,
             to=to_number,
         )
-        print(f"[SMS] ✅ Enviado — SID: {message.sid}")
+        print(f"[SMS] OK Enviado — SID: {message.sid}")
         return True
 
     except Exception as e:
         if "placeholder" not in str(e).lower():
-            print(f"[SMS] ❌ Error: {e}")
+            print(f"[SMS] ERROR Error: {e}")
         return False
 
 
@@ -472,7 +472,7 @@ def send_alert(alert: Alert) -> dict:
     }
     print(
         f"[Notificaciones] "
-        f"Email: {'✅' if results['email'] else '❌'} | "
-        f"SMS: {'✅' if results['sms'] else '⏭️ (no configurado)'}"
+        f"Email: {'OK' if results['email'] else 'ERROR'} | "
+        f"SMS: {'OK' if results['sms'] else 'SKIP (no configurado)'}"
     )
     return results
