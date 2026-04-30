@@ -85,14 +85,17 @@ class SignalStrength(Enum):
 
 class StrategyType(Enum):
     # Las 3 estrategias del libro
-    E1_CANAL_ALZA      = "E1 — Canal Lateral al Alza (CALL)"
-    E2_CANAL_BAJA      = "E2 — Canal Lateral a la Baja (PUT)"
-    E3_SALTO_ALCISTA   = "E3 — Salto Alcista en Apertura (CALL)"
-    E3_SALTO_BAJISTA   = "E3 — Salto Bajista en Apertura (PUT)"
-    E3_CAMBIO_TENDENCIA= "E3 — Salto Cambio de Tendencia"
-    # Monitoreo (no acción inmediata)
-    SQUEEZE_CANAL      = "Squeeze en Canal — Esperar Ruptura"
-    NONE               = "Sin estrategia"
+    E1_CANAL_ALZA        = "E1 — Canal Lateral al Alza (CALL)"
+    E2_CANAL_BAJA        = "E2 — Canal Lateral a la Baja (PUT)"
+    E3_SALTO_ALCISTA     = "E3 — Salto Alcista en Apertura (CALL)"
+    E3_SALTO_BAJISTA     = "E3 — Salto Bajista en Apertura (PUT)"
+    E3_CAMBIO_TENDENCIA  = "E3 — Salto Cambio de Tendencia"
+    # Tendencia fuerte — cuando todo está alineado sin canal ni salto
+    E4_TENDENCIA_CALL    = "E4 — Tendencia Fuerte Alcista (CALL)"
+    E4_TENDENCIA_PUT     = "E4 — Tendencia Fuerte Bajista (PUT)"
+    # Monitoreo
+    SQUEEZE_CANAL        = "Squeeze en Canal — Esperar Ruptura"
+    NONE                 = "Sin estrategia"
 
 
 # ============================================================
@@ -190,11 +193,11 @@ def check_events() -> list:
         if d in ECONOMIC_CALENDAR:
             ev = ECONOMIC_CALENDAR[d]
             if i == 0:
-                warn = f"⚠️ HOY: {ev['name']} — Máxima cautela, reducir tamaño"
+                warn = f"WARN HOY: {ev['name']} — Máxima cautela, reducir tamaño"
             elif i == 1:
-                warn = f"📅 MAÑANA: {ev['name']} — Reducir tamaño de posición"
+                warn = f"[D] MAÑANA: {ev['name']} — Reducir tamaño de posición"
             else:
-                warn = f"📅 En 2 días: {ev['name']} — Tener en cuenta"
+                warn = f"[D] En 2 días: {ev['name']} — Tener en cuenta"
             events.append({
                 "name":    ev["name"],
                 "impact":  ev["impact"],
@@ -255,16 +258,16 @@ def check_earnings(ticker: str) -> dict:
         date_str = earnings_date.strftime("%Y-%m-%d")
 
         if days_away == 0:
-            warn   = f"🚨 EARNINGS HOY ({date_str}) — NO ENTRAR. IV Crush garantizado al cierre."
+            warn   = f"ALERT EARNINGS HOY ({date_str}) — NO ENTRAR. IV Crush garantizado al cierre."
             impact = "CRITICO"
         elif days_away == 1:
-            warn   = f"⚠️ EARNINGS MAÑANA ({date_str}) — Máximo cuidado. Reducir tamaño al mínimo."
+            warn   = f"WARN EARNINGS MAÑANA ({date_str}) — Máximo cuidado. Reducir tamaño al mínimo."
             impact = "ALTO"
         elif days_away <= 3:
-            warn   = f"📅 EARNINGS en {days_away} días ({date_str}) — Tener en cuenta. IV ya elevada."
+            warn   = f"[D] EARNINGS en {days_away} días ({date_str}) — Tener en cuenta. IV ya elevada."
             impact = "MEDIO"
         else:
-            warn   = f"📅 EARNINGS en {days_away} días ({date_str}) — En el radar."
+            warn   = f"[D] EARNINGS en {days_away} días ({date_str}) — En el radar."
             impact = "BAJO"
 
         return {
@@ -356,7 +359,7 @@ def check_agotamiento(df_15m: pd.DataFrame, df_1h: pd.DataFrame,
             msg      = "Mercado lateral mostrando agotamiento."
 
         warning = (
-            f"⚠️ AGOTAMIENTO DETECTADO — {msg}\n"
+            f"WARN AGOTAMIENTO DETECTADO — {msg}\n"
             + "\n".join([f"   • {s}" for s in signals])
             + "\n   Del libro: 'Nada sube para siempre y nada baja para siempre.'"
             + "\n   Si tienes posición abierta, considera protegerla o salir."
@@ -863,29 +866,29 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     now = __import__('datetime').datetime.now(et)
     if now.hour == 9 and now.minute >= 30:
         score = min(score + 5, 95)
-        print(f"   ✅ Bonus apertura (+5pts) — ventana 9:30-10:00am")
+        print(f"   OK Bonus apertura (+5pts) — ventana 9:30-10:00am")
 
     # AJUSTE 2: Bonus momentum fuerte — tendencia 1H Y diario alineados
     if ma.trend_1h == "alcista_fuerte" and ma.daily_trend in ["alcista_fuerte","alcista_parcial"]:
         score = min(score + 5, 95)
         bullish += 1
-        print(f"   ✅ Bonus momentum alcista fuerte (+5pts)")
+        print(f"   OK Bonus momentum alcista fuerte (+5pts)")
     elif ma.trend_1h == "bajista_fuerte" and ma.daily_trend in ["bajista_fuerte","bajista_parcial"]:
         score = min(score + 5, 95)
         bearish += 1
-        print(f"   ✅ Bonus momentum bajista fuerte (+5pts)")
+        print(f"   OK Bonus momentum bajista fuerte (+5pts)")
 
     # ══ PENALIZACIONES ══
 
     # 1. Choppy — suavizado a 0.5 (no eliminar señal tan agresivo)
     if chop > 61.8:
         score *= 0.5
-        print(f"   ⚠️ Mercado choppy ({chop}) — score reducido 50%")
+        print(f"   WARN Mercado choppy ({chop}) — score reducido 50%")
         return round(score, 1), direction
 
     # 2. Sobreextensión BB
     if bb.overextended:
-        print(f"   ⚠️ Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda)")
+        print(f"   WARN Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda)")
         score *= 0.5
 
     # 3. RSI — penalización gradual en lugar de castigo brutal
@@ -896,24 +899,24 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     if bb.rsi_15m > 75 and direction == "alcista":
         if bb.rsi_15m > 85:
             score *= 0.5
-            print(f"   ⚠️ RSI {bb.rsi_15m} MUY extremo (>85) — bloqueando score")
+            print(f"   WARN RSI {bb.rsi_15m} MUY extremo (>85) — bloqueando score")
         elif bb.rsi_15m > 80:
             score = min(score, 60)
-            print(f"   ⚠️ RSI {bb.rsi_15m} alto (80-85) — limitando score a 60")
+            print(f"   WARN RSI {bb.rsi_15m} alto (80-85) — limitando score a 60")
         else:
             score = min(score, 70)
-            print(f"   ⚠️ RSI {bb.rsi_15m} elevado (75-80) — limitando score a 70")
+            print(f"   WARN RSI {bb.rsi_15m} elevado (75-80) — limitando score a 70")
 
     elif bb.rsi_15m < 25 and direction == "bajista":
         if bb.rsi_15m < 15:
             score *= 0.5
-            print(f"   ⚠️ RSI {bb.rsi_15m} MUY extremo (<15) — bloqueando score")
+            print(f"   WARN RSI {bb.rsi_15m} MUY extremo (<15) — bloqueando score")
         elif bb.rsi_15m < 20:
             score = min(score, 60)
-            print(f"   ⚠️ RSI {bb.rsi_15m} bajo (15-20) — limitando score a 60")
+            print(f"   WARN RSI {bb.rsi_15m} bajo (15-20) — limitando score a 60")
         else:
             score = min(score, 70)
-            print(f"   ⚠️ RSI {bb.rsi_15m} bajo (20-25) — limitando score a 70")
+            print(f"   WARN RSI {bb.rsi_15m} bajo (20-25) — limitando score a 70")
 
     # 4. Diario contradice 1H — AJUSTE 6: límite subido de 65 a 70
     #    (mercado en transición — no penalizar tan fuerte)
@@ -922,7 +925,7 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     if (direction == "alcista" and daily_bearish) or \
        (direction == "bajista" and daily_bullish):
         if score > 70:
-            print(f"   ⚠️ Diario contradice 1H — limitando score a 70")
+            print(f"   WARN Diario contradice 1H — limitando score a 70")
             score = 70
 
     return round(score, 1), direction
@@ -990,6 +993,45 @@ def identify_strategy(ma: MADecision, bb: BBDecision, gap: dict,
                 "Puede ser E1 (CALL) o E2 (PUT) dependiendo de la dirección de ruptura."
             )
             return StrategyType.SQUEEZE_CANAL, SignalDirection.NEUTRAL, SignalStrength.MODERADO, exp
+
+    # ── E4: TENDENCIA FUERTE ──
+    # Cuando todo está alineado (score alto + Vol ALTA + MAs fuertes)
+    # pero no hay canal ni salto — el libro dice que la tendencia también es operable
+    # Requisitos mínimos:
+    #   Score >= 70 (señal fuerte)
+    #   Vol ALTA (BB expandiendo con percentil > 75)
+    #   MAs 1H alcista_fuerte o bajista_fuerte
+    if (score >= 70 and
+        bb.volatility_level == "ALTA" and
+        ma.trend_1h in ["alcista_fuerte", "bajista_fuerte"]):
+
+        if pan_dir == "alcista":
+            exp = (
+                "E4 — TENDENCIA FUERTE ALCISTA.\n\n"
+                f"MAs 1H: {ma.trend_1h} — las 4 MAs en orden alcista (DECISIÓN)\n"
+                f"BB 15min: {bb.bandwidth_pct_15m:.0f}% percentil — ALTA volatilidad (ENTRADA)\n"
+                f"Vela 15min: {bb.candle_type} ({bb.candle_body_pct:.0f}% cuerpo)\n"
+                f"Diario: {ma.daily_trend} (CONTEXTO)\n"
+                f"Score: {score}/100\n\n"
+                "Del libro: cuando la tendencia es fuerte y la volatilidad confirma,\n"
+                "la dirección tiene alta probabilidad de continuar.\n"
+                "Confirmar en TC2000 antes de entrar."
+            )
+            return StrategyType.E4_TENDENCIA_CALL, SignalDirection.CALL, strength, exp
+
+        elif pan_dir == "bajista":
+            exp = (
+                "E4 — TENDENCIA FUERTE BAJISTA.\n\n"
+                f"MAs 1H: {ma.trend_1h} — las 4 MAs en orden bajista (DECISIÓN)\n"
+                f"BB 15min: {bb.bandwidth_pct_15m:.0f}% percentil — ALTA volatilidad (ENTRADA)\n"
+                f"Vela 15min: {bb.candle_type} ({bb.candle_body_pct:.0f}% cuerpo)\n"
+                f"Diario: {ma.daily_trend} (CONTEXTO)\n"
+                f"Score: {score}/100\n\n"
+                "Del libro: cuando la tendencia es fuerte y la volatilidad confirma,\n"
+                "la dirección tiene alta probabilidad de continuar.\n"
+                "Confirmar en TC2000 antes de entrar."
+            )
+            return StrategyType.E4_TENDENCIA_PUT, SignalDirection.PUT, strength, exp
 
     return StrategyType.NONE, SignalDirection.NEUTRAL, SignalStrength.DEBIL, ""
 
@@ -1092,14 +1134,14 @@ def _strategy_canal(ma: MADecision, bb: BBDecision,
 
         candle_txt = ""
         if bb.candle_body_pct > 70:
-            candle_txt = f"✅ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
+            candle_txt = f"OK Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
         else:
             # Sin vela extrema = señal más débil, bajar a MODERADO
             if strength == SignalStrength.FUERTE:
                 strength = SignalStrength.MODERADO
-            candle_txt = f"⚠️ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
+            candle_txt = f"WARN Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
 
-        confirm_1h = "✅ BB 1H también expandiendo" if bb.bb_expanding_1h else "⚠️ BB 1H no confirmado aún"
+        confirm_1h = "OK BB 1H también expandiendo" if bb.bb_expanding_1h else "WARN BB 1H no confirmado aún"
 
         exp = (
             "E1 — CANAL LATERAL AL ALZA.\n\n"
@@ -1121,13 +1163,13 @@ def _strategy_canal(ma: MADecision, bb: BBDecision,
 
         candle_txt = ""
         if bb.candle_body_pct > 70:
-            candle_txt = f"✅ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
+            candle_txt = f"OK Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmación del libro)\n"
         else:
             if strength == SignalStrength.FUERTE:
                 strength = SignalStrength.MODERADO
-            candle_txt = f"⚠️ Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
+            candle_txt = f"WARN Vela {bb.candle_type} — cuerpo {bb.candle_body_pct:.0f}% (confirmar visualmente)\n"
 
-        confirm_1h = "✅ BB 1H también expandiendo" if bb.bb_expanding_1h else "⚠️ BB 1H no confirmado aún"
+        confirm_1h = "OK BB 1H también expandiendo" if bb.bb_expanding_1h else "WARN BB 1H no confirmado aún"
 
         exp = (
             "E2 — CANAL LATERAL A LA BAJA.\n\n"
@@ -1162,7 +1204,7 @@ def generate_rec(direction: SignalDirection, strength: SignalStrength,
     # Earnings HOY = no entrar, punto
     if earnings and earnings.get("has_earnings") and earnings.get("days_away") == 0:
         return (
-            f"🚨 NO ENTRAR — EARNINGS HOY ({earnings['date']}).\n"
+            f"ALERT NO ENTRAR — EARNINGS HOY ({earnings['date']}).\n"
             "El IV Crush al cierre destruye el valor de la opción.\n"
             "Esperar al día siguiente del reporte para evaluar E3 (salto)."
         )
@@ -1181,7 +1223,7 @@ def generate_rec(direction: SignalDirection, strength: SignalStrength,
 
     if high_today:
         return (
-            f"{direction.value} {strength.value} — ⚠️ Evento de alto impacto HOY.\n"
+            f"{direction.value} {strength.value} — WARN Evento de alto impacto HOY.\n"
             "Reducir tamaño de posición o esperar después del evento."
         )
 
@@ -1190,15 +1232,15 @@ def generate_rec(direction: SignalDirection, strength: SignalStrength,
     if earnings and earnings.get("has_earnings"):
         days = earnings["days_away"]
         if days == 1:
-            earnings_txt = f"\n⚠️ EARNINGS MAÑANA — Reducir tamaño al mínimo."
+            earnings_txt = f"\nWARN EARNINGS MAÑANA — Reducir tamaño al mínimo."
         elif days <= 3:
-            earnings_txt = f"\n📅 Earnings en {days} días — IV elevada, tamaño reducido."
+            earnings_txt = f"\n[D] Earnings en {days} días — IV elevada, tamaño reducido."
 
     # Agotamiento = agregar nota de salida
     agot_txt = ""
     if agotamiento and agotamiento.get("has_agotamiento"):
         agot_txt = (
-            f"\n⚠️ Señales de agotamiento detectadas — "
+            f"\nWARN Señales de agotamiento detectadas — "
             "proteger posición si ya estás adentro."
         )
 
@@ -1350,7 +1392,7 @@ def run_analysis(tickers=None) -> list:
         if a:
             alerts.append(a)
             print(
-                f"[{ticker}] ✅ ALERTA: {a.strategy.value} → "
+                f"[{ticker}] OK ALERTA: {a.strategy.value} → "
                 f"{a.direction.value} {a.strength.value} "
                 f"(Score:{a.score} | Vol:{a.bb.volatility_level})"
             )
