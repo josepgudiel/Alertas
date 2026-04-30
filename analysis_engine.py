@@ -587,13 +587,20 @@ def analyze_bb(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> BBDecision:
     b1h = _calc(df_1h)
 
     # Nivel de volatilidad
+    # Percentil alto = volatilidad real presente
+    # Expansión activa = BB creciendo ahora mismo
+    # ALTA: percentil > 75 (expandiendo o no — si el percentil es muy alto la volatilidad ES real)
+    # MEDIA: percentil >= 60 con alguna expansión
+    # BAJA: percentil < 60
     pct       = b15["pct"]
     expanding = b15["expanding"]
 
-    if pct > 75 and expanding:
-        vol_level = "ALTA"
-    elif pct >= 60 and expanding:
-        vol_level = "MEDIA"
+    if pct > 80:
+        vol_level = "ALTA"    # percentil muy alto = volatilidad real sin importar expansión
+    elif pct > 75 and expanding:
+        vol_level = "ALTA"    # percentil alto + expandiendo = ALTA
+    elif pct >= 60:
+        vol_level = "MEDIA"   # percentil medio = MEDIA (sin requerir expansión)
     else:
         vol_level = "BAJA"
 
