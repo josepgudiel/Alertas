@@ -133,6 +133,10 @@ class BBDecision:
     candle_body_pct:    float   # % del cuerpo vs rango total
     bb_expanding_1h:    bool    # Confirmación en 1H también
     volatility_level:   str     # ALTA | MEDIA | BAJA
+    rsi_15m:            float   # RSI en 15min (0-100)
+    rsi_signal:         str     # OK | SOBRECOMPRADO | SOBREVENDIDO
+    overextended:       bool    # Precio muy lejos de banda media (sobreextensión)
+    overextension_pct:  float   # % que el precio está fuera de banda
 
 @dataclass
 class Alert:
@@ -580,7 +584,7 @@ def analyze_bb(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> BBDecision:
     b1h = _calc(df_1h)
 
     # Nivel de volatilidad
-    pct = b15["pct"]
+    pct       = b15["pct"]
     expanding = b15["expanding"]
 
     if pct > 75 and expanding:
@@ -590,13 +594,33 @@ def analyze_bb(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> BBDecision:
     else:
         vol_level = "BAJA"
 
+    # ── RSI 14 en 15min ──
+    rsi_val, rsi_signal = _calc_rsi(df_15m)
+
+    # ── Sobreextensión: precio muy lejos de banda media ──
+    price        = float(df_15m['Close'].iloc[-1]) if len(df_15m) > 0 else 0.0
+    mid          = b15["mid"]
+    upper        = b15["upper"]
+    lower        = b15["lower"]
+    band_width   = upper - lower
+    overextended = False
+    overext_pct  = 0.0
+
+    if band_width > 0 and mid > 0:
+        # Cuántas desviaciones está el precio del centro
+        dist_from_mid = abs(price - mid)
+        half_bw       = band_width / 2
+        overext_pct   = round((dist_from_mid / half_bw - 1) * 100, 1) if half_bw > 0 else 0.0
+        # Sobreextendido si precio > 2.5 desviaciones del centro
+        overextended  = dist_from_mid > half_bw * 1.5   # 50% más allá de la banda
+
     # Tipo de vela en 15min
     candle_type, body_pct = _candle_analysis(df_15m)
 
     return BBDecision(
         upper_15m=round(b15["upper"], 2),
         lower_15m=round(b15["lower"], 2),
-        mid_15m=round(b15["mid"], 2),
+        mid_15m=round(mid, 2),
         bandwidth_pct_15m=round(pct, 1),
         is_expanding_15m=expanding,
         is_squeeze_15m=b15["squeeze"],
@@ -606,6 +630,10 @@ def analyze_bb(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> BBDecision:
         candle_body_pct=round(body_pct, 1),
         bb_expanding_1h=b1h["expanding"],
         volatility_level=vol_level,
+        rsi_15m=round(rsi_val, 1),
+        rsi_signal=rsi_signal,
+        overextended=overextended,
+        overextension_pct=overext_pct,
     )
 
 
@@ -629,6 +657,42 @@ def _candle_analysis(df: pd.DataFrame):
         return ("extreme_bullish" if cl > op else "extreme_bearish"), body_pct
     else:
         return ("normal_bullish" if cl > op else "normal_bearish"), body_pct
+
+
+def _calc_rsi(df: pd.DataFrame, period: int = 14) -> tuple:
+    """
+    Calcula RSI de 14 periodos.
+    Retorna (valor_rsi, señal).
+    señal: OK | SOBRECOMPRADO (>70) | SOBREVENDIDO (<30)
+    """
+    try:
+        if len(df) < period + 2:
+            return 50.0, "OK"
+
+        close  = df['Close'].tail(period * 3)
+        delta  = close.diff()
+        gain   = delta.clip(lower=0)
+        loss   = (-delta).clip(lower=0)
+        avg_g  = gain.rolling(period).mean().iloc[-1]
+        avg_l  = loss.rolling(period).mean().iloc[-1]
+
+        if avg_l == 0:
+            return 100.0, "SOBRECOMPRADO"
+
+        rs  = avg_g / avg_l
+        rsi = round(100 - (100 / (1 + rs)), 1)
+
+        if rsi >= 70:
+            signal = "SOBRECOMPRADO"
+        elif rsi <= 30:
+            signal = "SOBREVENDIDO"
+        else:
+            signal = "OK"
+
+        return rsi, signal
+
+    except Exception:
+        return 50.0, "OK"
 
 
 # ============================================================
@@ -718,38 +782,44 @@ def analyze_gaps(df_daily: pd.DataFrame, ma: MADecision) -> dict:
 # SCORING — FIEL AL LIBRO
 # ============================================================
 
-def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
+def calc_score(ma: MADecision, bb: BBDecision, chop: float,
+               volume_ratio: float = 1.0) -> tuple:
     """
     Score 0-100. Mínimo 55 para alertar.
 
     Pesos:
-      BB 15min (volatilidad real) → 40 pts  (ES LA CONFIRMACIÓN DE ENTRADA)
-      MAs 1H   (tendencia)        → 45 pts  (ES LA DECISIÓN)
-      Diario   (contexto)         → 15 pts  (ES EL CONTEXTO)
+      BB 15min (volatilidad real) → 40 pts  (CONFIRMACIÓN DE ENTRADA)
+      MAs 1H   (tendencia)        → 45 pts  (DECISIÓN)
+      Diario   (contexto)         → 15 pts  (CONTEXTO)
+      Volumen  (confirmación)     → bonus/penalización
 
-    Penalización:
+    Penalizaciones:
       Choppy > 61.8               → score * 0.4
+      RSI sobrecomprado + CALL    → score * 0.5  (no entrar en techo)
+      RSI sobrevendido  + PUT     → score * 0.5  (no entrar en piso)
+      Sobreextensión BB           → score * 0.5  (reversión probable)
+      Volumen < 0.7x promedio     → score * 0.8  (sin convicción)
+      Diario contradice 1H        → score máximo 65
     """
     score   = 0.0
     bullish = 0
     bearish = 0
 
     # ── BB 15min — hasta 40 pts ──
-    # Volatilidad ALTA (percentil >75 + expandiendo) = ENTRADA del libro
     if bb.volatility_level == "ALTA":
         score += 30
         if bb.price_above_upper:
-            score += 10; bearish += 2   # sobreextensión → PUT
+            score += 10; bearish += 2
         elif bb.price_below_lower:
-            score += 10; bullish += 2   # sobreextensión → CALL
+            score += 10; bullish += 2
         elif bb.candle_body_pct > 70:
-            score += 7                  # vela extrema = confirmación libro
+            score += 7
     elif bb.volatility_level == "MEDIA":
         score += 18
         if bb.price_above_upper or bb.price_below_lower:
             score += 5
     elif bb.is_squeeze_15m:
-        score += 8  # squeeze = vigilar pero no entrar aún
+        score += 8
 
     # ── MAs 1H — hasta 45 pts ──
     if ma.trend_1h == "alcista_fuerte":
@@ -761,7 +831,7 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     elif ma.trend_1h == "bajista_parcial":
         score += 30; bearish += 2
     elif ma.is_lateral_1h:
-        score += 18   # canal = potencial E1/E2
+        score += 18
 
     if ma.price_above_all:
         score = min(score + 5, 95); bullish += 1
@@ -778,15 +848,49 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float) -> tuple:
     elif ma.daily_trend == "bajista_parcial":
         score += 9;  bearish += 1
 
-    # ── Penalización choppy ──
-    if chop > 61.8:
-        score *= 0.4
-
+    # ── Dirección preliminar ──
     direction = (
         "alcista" if bullish > bearish else
         "bajista" if bearish > bullish else
         "mixto"
     )
+
+    # ══ PENALIZACIONES ══
+
+    # 1. Choppy
+    if chop > 61.8:
+        score *= 0.4
+        return round(score, 1), direction
+
+    # 2. Sobreextensión BB — precio demasiado lejos de la media
+    #    Esto es lo que causó el falso CALL que viste
+    if bb.overextended:
+        print(f"   ⚠️ Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda) — penalizando score")
+        score *= 0.5
+
+    # 3. RSI conflicto con dirección
+    #    CALL cuando RSI sobrecomprado = comprar en el techo = error clásico
+    #    PUT cuando RSI sobrevendido   = vender en el piso   = error clásico
+    if bb.rsi_signal == "SOBRECOMPRADO" and direction == "alcista":
+        print(f"   ⚠️ RSI {bb.rsi_15m} sobrecomprado en señal alcista — penalizando score")
+        score *= 0.5
+    elif bb.rsi_signal == "SOBREVENDIDO" and direction == "bajista":
+        print(f"   ⚠️ RSI {bb.rsi_15m} sobrevendido en señal bajista — penalizando score")
+        score *= 0.5
+
+    # 4. Diario contradice 1H — limitar score máximo
+    daily_bullish = ma.daily_trend in ["alcista_fuerte", "alcista_parcial"]
+    daily_bearish = ma.daily_trend in ["bajista_fuerte", "bajista_parcial"]
+    if (direction == "alcista" and daily_bearish) or \
+       (direction == "bajista" and daily_bullish):
+        if score > 65:
+            print(f"   ⚠️ Diario contradice 1H — limitando score a 65")
+            score = 65
+
+    # 5. Volumen bajo — sin convicción
+    if volume_ratio < 0.7:
+        print(f"   ⚠️ Volumen bajo ({volume_ratio:.1f}x promedio) — penalizando score")
+        score *= 0.8
 
     return round(score, 1), direction
 
@@ -1121,7 +1225,15 @@ def analyze_ticker(ticker: str) -> Optional[Alert]:
         gap  = analyze_gaps(df_daily, ma)
         chop = calc_choppiness(df_1h)
 
-        score, pan_dir = calc_score(ma, bb, chop)
+        # ── Volumen: ratio vs promedio 20 barras en 15min ──
+        volume_ratio = 1.0
+        if 'Volume' in df_15m.columns and len(df_15m) >= 21:
+            vol_now = float(df_15m['Volume'].iloc[-1])
+            vol_avg = float(df_15m['Volume'].tail(21).iloc[:-1].mean())
+            volume_ratio = round(vol_now / vol_avg, 2) if vol_avg > 0 else 1.0
+            print(f"   Volumen: {volume_ratio:.1f}x promedio")
+
+        score, pan_dir = calc_score(ma, bb, chop, volume_ratio)
 
         print(
             f"[{ticker}] Score:{score} | Chop:{chop} | "
