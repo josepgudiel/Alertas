@@ -1,5 +1,5 @@
 """
-SAAI v5.2 - Smart Alert AI System
+SAAI v5.3 - Smart Alert AI System
 Motor de Análisis — FIEL AL LIBRO
 
 Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
@@ -891,14 +891,32 @@ def calc_score(ma: MADecision, bb: BBDecision, chop: float,
         print(f"   ⚠️ Sobreextensión BB ({bb.overextension_pct:.0f}% más allá de banda)")
         score *= 0.5
 
-    # 3. RSI conflicto — AJUSTE 5: umbral subido de 70 a 75
-    #    (AMD RSI 76 subió +2.73% — umbral 70 era demasiado estricto)
+    # 3. RSI — penalización gradual en lugar de castigo brutal
+    #    Basado en backtesting: AMD RSI 76 subió +2.73%, umbral * 0.5 era excesivo
+    #    RSI 75-80 → cap 70   (alerta MODERADO, no bloquear)
+    #    RSI 80-85 → cap 60   (alerta débil, pasar umbral)
+    #    RSI > 85  → * 0.5    (bloquear — realmente extremo, ej. SPY lunes RSI 86)
     if bb.rsi_15m > 75 and direction == "alcista":
-        print(f"   ⚠️ RSI {bb.rsi_15m} extremo (>75) en señal alcista — penalizando")
-        score *= 0.5
+        if bb.rsi_15m > 85:
+            score *= 0.5
+            print(f"   ⚠️ RSI {bb.rsi_15m} MUY extremo (>85) — bloqueando score")
+        elif bb.rsi_15m > 80:
+            score = min(score, 60)
+            print(f"   ⚠️ RSI {bb.rsi_15m} alto (80-85) — limitando score a 60")
+        else:
+            score = min(score, 70)
+            print(f"   ⚠️ RSI {bb.rsi_15m} elevado (75-80) — limitando score a 70")
+
     elif bb.rsi_15m < 25 and direction == "bajista":
-        print(f"   ⚠️ RSI {bb.rsi_15m} extremo (<25) en señal bajista — penalizando")
-        score *= 0.5
+        if bb.rsi_15m < 15:
+            score *= 0.5
+            print(f"   ⚠️ RSI {bb.rsi_15m} MUY extremo (<15) — bloqueando score")
+        elif bb.rsi_15m < 20:
+            score = min(score, 60)
+            print(f"   ⚠️ RSI {bb.rsi_15m} bajo (15-20) — limitando score a 60")
+        else:
+            score = min(score, 70)
+            print(f"   ⚠️ RSI {bb.rsi_15m} bajo (20-25) — limitando score a 70")
 
     # 4. Diario contradice 1H — AJUSTE 6: límite subido de 65 a 70
     #    (mercado en transición — no penalizar tan fuerte)
@@ -1334,7 +1352,7 @@ def run_analysis(tickers=None) -> list:
     et = pytz.timezone('US/Eastern')
 
     print(f"\n{'=' * 65}")
-    print(f"  SAAI v5.2 — Smart Alert AI System")
+    print(f"  SAAI v5.3 — Smart Alert AI System")
     print(f"  Un Millón al Año No Hace Daño — Yoel Sardiñas")
     print(f"  Estrategias: E1 Canal Alza | E2 Canal Baja | E3 Saltos")
     print(f"  Volatilidad: ALTA(>75%) | MEDIA(60-75%) | BAJA(<60%)")
