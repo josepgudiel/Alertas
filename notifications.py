@@ -120,6 +120,27 @@ def format_email_html(alert: Alert) -> str:
     confirm_1h_txt = "✅ BB 1H expandiendo también" if alert.bb.bb_expanding_1h \
                      else "⚠️ BB 1H pendiente de confirmar"
 
+    # RSI
+    rsi = alert.bb.rsi_15m
+    if alert.bb.rsi_signal == "SOBRECOMPRADO":
+        rsi_color = "#c8401a"
+        rsi_txt   = f"🔴 {rsi} — SOBRECOMPRADO (>70) — cuidado con CALL"
+    elif alert.bb.rsi_signal == "SOBREVENDIDO":
+        rsi_color = "#1a6b3c"
+        rsi_txt   = f"🟢 {rsi} — SOBREVENDIDO (<30) — cuidado con PUT"
+    else:
+        rsi_color = "#333"
+        rsi_txt   = f"✅ {rsi} — Zona neutral"
+
+    # Sobreextensión
+    if alert.bb.overextended:
+        overext_txt = (
+            f"⚠️ SÍ — precio {alert.bb.overextension_pct:.0f}% más allá de la banda "
+            f"— alta probabilidad de reversión"
+        )
+    else:
+        overext_txt = "✅ No — precio dentro de rango normal"
+
     # Earnings
     if alert.earnings.get("has_earnings"):
         days = alert.earnings.get("days_away", 0)
@@ -249,6 +270,14 @@ def format_email_html(alert: Alert) -> str:
       <tr style="border-bottom:1px solid #eee;">
         <td style="padding:8px 12px;color:#666;font-size:12px;">Vela Confirmación 15min</td>
         <td style="padding:8px 12px;font-size:12px;">{candle_txt}{candle_body}</td>
+      </tr>
+      <tr style="border-bottom:1px solid #eee;">
+        <td style="padding:8px 12px;color:#666;font-size:12px;">RSI 14 (15min)</td>
+        <td style="padding:8px 12px;font-size:12px;font-weight:600;color:{rsi_color};">{rsi_txt}</td>
+      </tr>
+      <tr style="border-bottom:1px solid #eee;">
+        <td style="padding:8px 12px;color:#666;font-size:12px;">Sobreextensión BB</td>
+        <td style="padding:8px 12px;font-size:12px;">{overext_txt}</td>
       </tr>
       <tr style="border-bottom:1px solid #eee;">
         <td style="padding:8px 12px;color:#666;font-size:12px;">Confirmación 1H</td>
