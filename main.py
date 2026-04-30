@@ -1,5 +1,9 @@
 """
-SAAI v5.1 — Punto de Entrada Principal
+SAAI v5.0 — Punto de Entrada Principal
+Basado en "Un Millón al Año No Hace Daño" — Yoel Sardiñas
+
+Estrategias: E1 Canal Alza | E2 Canal Baja | E3 Saltos (apertura)
+Volatilidad obligatoria: ALTA para E1/E2 | MEDIA+ para E3
 """
 
 import json
@@ -31,13 +35,16 @@ def save_alert_history(history: dict):
 
 
 def is_duplicate(alert, history: dict) -> bool:
+    """Evita enviar la misma alerta dos veces en 30 minutos."""
     key = f"{alert.ticker}_{alert.strategy.value}_{alert.direction.value}"
     et  = pytz.timezone('US/Eastern')
     now = datetime.now(et)
+
     for sent in history.get("alerts", []):
         if sent.get("key") == key:
             sent_time = datetime.fromisoformat(sent["timestamp"]).replace(tzinfo=et)
-            if (now - sent_time).total_seconds() < 1800:
+            diff      = now - sent_time
+            if diff.total_seconds() < 1800:  # 30 minutos
                 return True
     return False
 
@@ -45,48 +52,55 @@ def is_duplicate(alert, history: dict) -> bool:
 def is_market_hours() -> bool:
     et  = pytz.timezone('US/Eastern')
     now = datetime.now(et)
+
     if now.weekday() >= 5:
-        print("[SAAI] Fin de semana -- mercado cerrado")
+        print("[SAAI] Fin de semana — mercado cerrado")
         return False
+
     market_open  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
     market_close = now.replace(hour=16, minute=0,  second=0, microsecond=0)
+
     if now < market_open or now > market_close:
-        print(f"[SAAI] Fuera de horario de mercado -- {now.strftime('%I:%M %p ET')}")
+        print(f"[SAAI] Fuera de horario de mercado — {now.strftime('%I:%M %p ET')}")
         return False
+
     return True
 
 
 def main():
     print("\n" + "=" * 65)
-    print("  SAAI v5.1 -- Smart Alert AI System")
-    print("  Un Millon al Anno No Hace Danno -- Yoel Sardinas")
+    print("  SAAI v5.0 — Smart Alert AI System")
+    print("  Un Millón al Año No Hace Daño — Yoel Sardiñas")
     print("  E1: Canal Alza | E2: Canal Baja | E3: Saltos Apertura")
     print("=" * 65)
 
     if not is_market_hours():
         if os.environ.get("SAAI_TEST_MODE") == "true":
-            print("[SAAI] Modo de prueba -- ejecutando fuera de horario")
+            print("[SAAI] Modo de prueba — ejecutando fuera de horario")
         else:
-            print("[SAAI] Terminando -- fuera de horario de mercado")
+            print("[SAAI] Terminando — fuera de horario de mercado")
             return
 
+    # Tickers: desde variable de entorno o lista completa del libro
     env_tickers = os.environ.get("SAAI_TICKERS", "")
     tickers = [t.strip() for t in env_tickers.split(",")] if env_tickers else None
 
     alerts = run_analysis(tickers)
 
     if not alerts:
-        print("\n[SAAI] Sin senales -- condiciones por debajo del umbral")
+        print("\n[SAAI] Sin señales — condiciones por debajo del umbral")
         return
 
-    history    = load_alert_history()
+    history   = load_alert_history()
     sent_count = 0
 
     for alert in alerts:
+        # Nunca enviar señales débiles
         if alert.strength == SignalStrength.DEBIL:
             continue
+
         if is_duplicate(alert, history):
-            print(f"[{alert.ticker}] Alerta duplicada -- ya enviada recientemente")
+            print(f"[{alert.ticker}] Alerta duplicada — ya enviada recientemente")
             continue
 
         print(f"\n[{alert.ticker}] Enviando alerta...")
@@ -116,7 +130,7 @@ def main():
     save_alert_history(history)
 
     print(f"\n{'=' * 65}")
-    print(f"  Resumen: {len(alerts)} senales | {sent_count} alertas enviadas")
+    print(f"  Resumen: {len(alerts)} señales | {sent_count} alertas enviadas")
     print(f"{'=' * 65}\n")
 
 
