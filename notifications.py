@@ -45,7 +45,9 @@ def format_email_html(alert: Alert) -> str:
         StrategyType.E3_SALTO_ALCISTA:    ("E3", "#1a3a6b"),
         StrategyType.E3_SALTO_BAJISTA:    ("E3", "#1a3a6b"),
         StrategyType.E3_CAMBIO_TENDENCIA: ("E3", "#b8860b"),
-        StrategyType.SQUEEZE_CANAL:       ("NEUTRAL",  "#b8860b"),
+        StrategyType.E4_TENDENCIA_CALL:   ("E4", "#1a6b3c"),
+        StrategyType.E4_TENDENCIA_PUT:    ("E4", "#c8401a"),
+        StrategyType.SQUEEZE_CANAL:       ("SQ", "#b8860b"),
     }
     badge_txt, badge_color = strat_badges.get(alert.strategy, ("?", "#888"))
 
