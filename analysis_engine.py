@@ -284,9 +284,12 @@ def score_e4_call(bb15, bb1h, bbdiario, chop):
     else: criterios["d_precio_sobre_mid"]=False
     criterios["d_volatilidad"]=bbdiario.volatilidad_abierta
     if chop>61.8: score*=0.5; notas.append(f"WARN Choppy ({chop})")
-    if bb15.rsi>85: score*=0.5; notas.append(f"WARN RSI {bb15.rsi} muy extremo")
-    elif bb15.rsi>80: score=min(score,60); notas.append(f"WARN RSI {bb15.rsi} alto")
-    elif bb15.rsi>75: score=min(score,70); notas.append(f"WARN RSI {bb15.rsi} elevado")
+    # RSI para CALL -- basado en backtesting:
+    # RSI 68-80 en CALL falla consistentemente (mercado sobrecomprado)
+    # RSI > 80 bloquear completamente
+    if bb15.rsi>80:   score*=0.5;      notas.append(f"WARN RSI {bb15.rsi} muy extremo (>80) -- bloqueando")
+    elif bb15.rsi>75: score=min(score,55); notas.append(f"WARN RSI {bb15.rsi} alto (75-80) -- cap 55")
+    elif bb15.rsi>68: score=min(score,65); notas.append(f"WARN RSI {bb15.rsi} elevado (68-75) -- cap 65")
     return round(score,1), criterios, "\n".join(notas)
 
 def score_e4_put(bb15, bb1h, bbdiario, chop):
@@ -317,9 +320,12 @@ def score_e4_put(bb15, bb1h, bbdiario, chop):
     else: criterios["d_precio_bajo_mid"]=False
     criterios["d_volatilidad"]=bbdiario.volatilidad_abierta
     if chop>61.8: score*=0.5; notas.append(f"WARN Choppy ({chop})")
-    if bb15.rsi<15: score*=0.5; notas.append(f"WARN RSI {bb15.rsi} muy extremo")
-    elif bb15.rsi<20: score=min(score,60); notas.append(f"WARN RSI {bb15.rsi} muy bajo")
-    elif bb15.rsi<25: score=min(score,70); notas.append(f"WARN RSI {bb15.rsi} bajo")
+    # RSI para PUT -- basado en backtesting:
+    # RSI < 22 en PUT = rebote inminente, no continua bajando
+    # AAPL RSI 21 → +1.81% | AMZN RSI 15 → +1.44% (ambos incorrectos)
+    if bb15.rsi<20:   score*=0.5;      notas.append(f"WARN RSI {bb15.rsi} rebote inminente (<20) -- bloqueando")
+    elif bb15.rsi<25: score=min(score,55); notas.append(f"WARN RSI {bb15.rsi} muy bajo (20-25) -- cap 55")
+    elif bb15.rsi<32: score=min(score,65); notas.append(f"WARN RSI {bb15.rsi} bajo (25-32) -- cap 65")
     return round(score,1), criterios, "\n".join(notas)
 
 def identify_e4(bb15, bb1h, bbdiario, chop):
