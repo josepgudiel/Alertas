@@ -289,7 +289,7 @@ def score_e4_call(bb15, bb1h, bbdiario, chop):
     # RSI > 80 bloquear completamente
     if bb15.rsi>80:   score*=0.5;      notas.append(f"WARN RSI {bb15.rsi} muy extremo (>80) -- bloqueando")
     elif bb15.rsi>75: score=min(score,55); notas.append(f"WARN RSI {bb15.rsi} alto (75-80) -- cap 55")
-    elif bb15.rsi>68: score=min(score,65); notas.append(f"WARN RSI {bb15.rsi} elevado (68-75) -- cap 65")
+    elif bb15.rsi>68: score=min(score,58); notas.append(f"WARN RSI {bb15.rsi} elevado (68-75) -- cap 58")
     return round(score,1), criterios, "\n".join(notas)
 
 def score_e4_put(bb15, bb1h, bbdiario, chop):
