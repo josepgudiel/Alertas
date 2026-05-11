@@ -146,7 +146,7 @@ def format_email_html(alert: Alert) -> str:
       1H -- DECISION (obligatorio)
     </div>
     <table style="width:100%;border-collapse:collapse;">
-      {crit_row("Tendencia al alza/baja", trend_1h_key, bb1h.tendencia if hasattr(alert, 'bb1h') else "")}
+      {crit_row("Tendencia al alza/baja", trend_1h_key, alert.bb1h.tendencia)}
       {crit_row("Espacio al disipador", esp_1h_key, esp_1h_val)}
       {crit_row("MA20 1H inclinada", mid_1h_key, "")}
       <tr style="border-bottom:1px solid #eee;">
