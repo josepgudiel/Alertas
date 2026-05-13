@@ -1,4 +1,4 @@
-“””
+"""
 SAAI v6.1 – Punto de Entrada Principal
 E4 – Saliendo de Bollinger Bands
 “””
