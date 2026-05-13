@@ -1,7 +1,7 @@
 """
 SAAI v6.1 – Punto de Entrada Principal
 E4 – Saliendo de Bollinger Bands
-“””
+"""
 
 import json
 import os
@@ -59,7 +59,7 @@ print(”  E4 – Saliendo de Bollinger Bands”)
 print(”  Basado en documento de metodologia personal”)
 print(”=”*65)
 
-```
+
 if not is_market_hours():
     if os.environ.get("SAAI_TEST_MODE") == "true":
         print("[SAAI] Modo de prueba -- ejecutando fuera de horario")
@@ -113,7 +113,7 @@ save_alert_history(history)
 print(f"\n{'='*65}")
 print(f"  Resumen: {len(alerts)} senales | {sent_count} alertas enviadas")
 print(f"{'='*65}\n")
-```
+
 
 if **name** == “**main**”:
 main()
