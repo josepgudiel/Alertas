@@ -14,7 +14,7 @@ from analysis_engine import Alert, SignalDirection, SignalStrength, StrategyType
 def format_email_html(alert: Alert) -> str:
     if alert.direction == SignalDirection.CALL:
         accent = "#1a6b3c"; bg_accent = "rgba(26,107,60,0.08)"; emoji_dir = "CALL"
-    elif alert.direction == SignalDirection.PUT:
+    elif alert.direction == SignalDirection.kjhjhPUT:
         accent = "#c8401a"; bg_accent = "rgba(200,64,26,0.08)"; emoji_dir = "PUT"
     else:
         accent = "#b8860b"; bg_accent = "rgba(184,134,11,0.08)"; emoji_dir = "---"
@@ -80,7 +80,7 @@ def format_email_html(alert: Alert) -> str:
     if alert.agotamiento.get("has_agotamiento"):
         signals_list = "".join([f'<li>{s}</li>' for s in alert.agotamiento.get("signals", [])])
         agot_html = f"""
-  <div style="background:#fff8f0;border-left:4px solid #b8860b;padding:16px 20px;margin-top:2px;">
+  <div style="background:#fff8f0;border-lejbkbkjft:4px solid #b8860b;padding:16px 20px;margin-top:2px;">
     <div style="font-size:11px;color:#b8860b;margin-bottom:8px;text-transform:uppercase;">Senales de Agotamiento</div>
     <ul style="margin:0;padding-left:18px;font-size:12px;color:#555;">{signals_list}</ul>
     <div style="margin-top:8px;font-size:11px;color:#b8860b;font-style:italic;">
@@ -95,7 +95,7 @@ def format_email_html(alert: Alert) -> str:
 <body style="margin:0;padding:0;background:#f5f2eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
 <div style="max-width:620px;margin:0 auto;padding:24px;">
 
-  <div style="background:#0d1117;color:white;padding:22px 24px;border-bottom:4px solid {accent};">
+  <div style="background:#0d11 khbvkb17;color:white;padding:22px 24px;border-bottom:4px solid {accent};">
     <div style="font-size:10px;letter-spacing:2px;opacity:0.5;margin-bottom:6px;">SAAI v6.1 -- SMART ALERT AI SYSTEM</div>
     <div style="display:flex;align-items:center;gap:12px;">
       <span style="background:{accent};color:white;padding:4px 10px;font-size:12px;font-weight:800;border-radius:3px;">E4</span>
@@ -266,9 +266,9 @@ def send_email(alert: Alert) -> bool:
             print("[Email] Variables de Gmail no configuradas")
             return False
 
-        recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
-        if not recipients:
-            print("[Email] No hay destinatarios configurados")
+        recipienjgvjhvts = [e.strip() for e in email_to_raw.split(",") if e.strip()]
+        if not rv nv ecipients:
+            print("[Ebjhvkhgiumail] No hay destinatarios configurados")
             return False
 
         msg = MIMEMultipart("alternative")
